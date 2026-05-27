@@ -219,6 +219,62 @@ describe('POST /api/orders', () => {
       .send({ product_id: 10, quantity: 1 });
     expect(res.status).toBe(402);
   });
+
+  it('returns 422 when PWYW custom_price is below min_price', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    const pwywProduct = {
+      ...product,
+      pricing_model: 'pwyw',
+      min_price: 5.0,
+    };
+    stellar.getBalance.mockResolvedValueOnce(99999);
+    mockQuery
+      .mockResolvedValueOnce({ rows: [pwywProduct], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [buyer], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ product_id: 10, quantity: 1, custom_price: 3.0 });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('validation_error');
+    expect(res.body.message).toContain('Minimum price is 5');
+  });
+
+  it('accepts PWYW order when custom_price meets min_price', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    const pwywProduct = {
+      ...product,
+      pricing_model: 'pwyw',
+      min_price: 5.0,
+    };
+    stellar.getBalance.mockResolvedValueOnce(99999);
+    stellar.sendPayment.mockResolvedValueOnce('TXHASH_OK');
+    mockQuery
+      .mockResolvedValueOnce({ rows: [pwywProduct], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [buyer], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // stock decrement
+      .mockResolvedValueOnce({ rows: [{ id: 99 }], rowCount: 1 }) // INSERT order
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE order paid
+      .mockResolvedValueOnce({ rows: [{ id: 1 }], rowCount: 1 }) // farmer lookup
+      .mockResolvedValueOnce({
+        rows: [{ quantity: 8, low_stock_threshold: 5, low_stock_alerted: 0 }],
+        rowCount: 1,
+      }); // low-stock
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ product_id: 10, quantity: 1, custom_price: 5.0 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('paid');
+  });
 });
 
 describe('GET /api/orders', () => {
