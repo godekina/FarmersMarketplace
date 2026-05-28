@@ -293,6 +293,36 @@ router.get('/farmers/pending', async (req, res) => {
   res.json({ success: true, data: rows });
 });
 
+// POST /api/admin/farmers/:id/verify - Set verified flag for a farmer
+router.post('/farmers/:id/verify', async (req, res) => {
+  const farmerId = req.params.id;
+  const { verified } = req.body;
+
+  if (typeof verified !== 'boolean') {
+    return res.status(400).json({ success: false, error: 'verified must be a boolean', code: 'validation_error' });
+  }
+
+  const { rows } = await db.query('SELECT id, name, email, role FROM users WHERE id = $1', [farmerId]);
+  if (!rows[0]) return res.status(404).json({ success: false, error: 'User not found' });
+  if (rows[0].role !== 'farmer') return res.status(400).json({ success: false, error: 'User is not a farmer' });
+
+  await db.query('UPDATE users SET verified = $1 WHERE id = $2', [verified, farmerId]);
+
+  // Notify farmer via email about verification status change
+  const mailer = require('../utils/mailer');
+  const farmer = rows[0];
+  const subject = verified ? '✅ You are now a verified farmer' : 'ℹ️ Farmer verification removed';
+  const message = verified
+    ? `Hello ${farmer.name},\n\nAn administrator has marked your account as verified. You will now show a verified badge on your public profile.\n\nBest regards,\nFarmers Marketplace`
+    : `Hello ${farmer.name},\n\nAn administrator has removed the verified badge from your account. If you have questions please contact support.\n\nBest regards,\nFarmers Marketplace`;
+
+  mailer
+    .sendMail({ to: farmer.email, subject, text: message })
+    .catch((e) => console.error('[Admin] Failed to send verification email:', e.message));
+
+  res.json({ success: true, message: `Farmer verified=${verified}` });
+});
+
 // PATCH /api/admin/farmers/:id/verify - Approve or reject verification
 router.patch('/farmers/:id/verify', async (req, res) => {
   const { status, reason } = req.body;

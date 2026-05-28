@@ -6,7 +6,7 @@ const { err } = require('../middleware/error');
 const { sanitizeText } = require('../utils/sanitize');
 
 const PUBLIC_FIELDS =
-  'u.id, u.name, u.bio, u.location, u.avatar_url, u.created_at, u.latitude, u.longitude, u.farm_address';
+  'u.id, u.name, u.bio, u.location, u.avatar_url, u.created_at, u.latitude, u.longitude, u.farm_address, u.verified';
 
 // GET /api/farmers/:id
 router.get('/:id', async (req, res) => {
