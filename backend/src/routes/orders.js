@@ -92,7 +92,9 @@ router.get('/:id/payment-link', async (req, res) => {
  *     security:
  *       - bearerAuth: []
  */
-router.post('/', auth, validate.order, async (req, res) => {
+const createPerUserRateLimiter = require('../middleware/rateLimitPerUser');
+
+router.post('/', auth, createPerUserRateLimiter(10, 60 * 1000), validate.order, async (req, res) => {
   if (req.user.role !== 'buyer') return err(res, 403, 'Only buyers can place orders', 'forbidden');
 
   const { product_id, quantity, address_id, coupon_code, use_soroban_escrow, custom_price, weight, source_asset } = req.body;
