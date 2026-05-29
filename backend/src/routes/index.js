@@ -348,5 +348,6 @@ registerRoute('/', '/bundles', require('./bundles'));
 registerRoute('/', '/farmers/bundles', require('./bundleDiscounts'));
 registerRoute('/', '', require('./export'));
 registerRoute('/', '/announcements', require('./announcements'));
+registerRoute('/', '/auctions', require('./auctions'));
 
 module.exports = router;
