@@ -86,6 +86,7 @@ export default function ProductDetail() {
    const { usd } = useXlmRate();
   const [addresses, setAddresses] = useState([]);
   const [selectedAddressId, setSelectedAddressId] = useState(null);
+  const [isOutOfDeliveryZone, setIsOutOfDeliveryZone] = useState(false);
   const [useEscrow, setUseEscrow] = useState(false);
   const [alertSet, setAlertSet] = useState(false);
   const [alertLoading, setAlertLoading] = useState(false);
@@ -128,6 +129,40 @@ export default function ProductDetail() {
   // Platform fee state
   const [feeInfo, setFeeInfo] = useState(null); // { feePercent, feeAmount, farmerAmount }
   const [shareMeta, setShareMeta] = useState(null);
+
+   // Helper to calculate distance between two coordinates in km
+   const calculateDistance = (lat1, lng1, lat2, lng2) => {
+     const R = 6371;
+     const dLat = (lat2 - lat1) * Math.PI / 180;
+     const dLng = (lng2 - lng1) * Math.PI / 180;
+     const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+       Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+     return R * c;
+   };
+
+   // Check geo-fencing when selected address changes
+   useEffect(() => {
+     if (!product || !selectedAddressId || !addresses.length) {
+       setIsOutOfDeliveryZone(false);
+       return;
+     }
+     const addr = addresses.find(a => a.id === selectedAddressId);
+     if (!addr || !product.delivery_radius || !product.origin_lat || !product.origin_lng) {
+       setIsOutOfDeliveryZone(false);
+       return;
+     }
+     // Address coordinates might be stored as lat/lng or latitude/longitude
+     const addrLat = addr.latitude ?? addr.lat;
+     const addrLng = addr.longitude ?? addr.lng;
+     if (addrLat == null || addrLng == null) {
+       setIsOutOfDeliveryZone(false);
+       return;
+     }
+     const distance = calculateDistance(product.origin_lat, product.origin_lng, addrLat, addrLng);
+     const radiusKm = product.delivery_radius > 1000 ? product.delivery_radius / 1000 : product.delivery_radius;
+     setIsOutOfDeliveryZone(distance > radiusKm);
+   }, [product, selectedAddressId, addresses]);
 
    const loadReviews = useCallback(async () => {
      try { const res = await api.getProductReviews(id); setReviews(res.data ?? []); }
@@ -923,6 +958,11 @@ export default function ProductDetail() {
               onClick={() => navigate('/addresses')}>
               {t('productDetail.manageAddresses')}
             </button>
+            {isOutOfDeliveryZone && (
+              <div style={{ background: '#fee', border: '1px solid #f5a5a5', borderRadius: 8, padding: 12, marginTop: 12, fontSize: 14, color: '#c0392b' }}>
+                ⚠️ This product does not deliver to your selected address location.
+              </div>
+            )}
           </div>
         )}
 
