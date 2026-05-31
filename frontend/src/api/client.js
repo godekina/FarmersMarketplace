@@ -245,6 +245,7 @@ export const api = {
   getMyAlert: (productId) => request(`/products/${productId}/alert/status`),
 
   getXlmRate: () => request('/rates/xlm-usd'),
+  getMarketRate: () => request('/market/xlm-usdc'),
   bulkUpdatePrices: (updates, adjustment_percent) =>
     request('/products/bulk-price', { method: 'PATCH', body: { updates, adjustment_percent } }),
 
@@ -262,6 +263,8 @@ export const api = {
   adminGetOrders: (page = 1) => request(`/admin/orders?page=${page}`),
   adminDeactivateUser: (id) => request(`/admin/users/${id}`, { method: 'DELETE' }),
   adminGetStats: () => request('/admin/stats'),
+  adminGetDisputes: () => request('/disputes'),
+  adminResolveDispute: (id, body) => request(`/disputes/${id}`, { method: 'PATCH', body }),
   adminGetContracts: (qs = '') => request(`/admin/contracts${qs}`),
   adminRegisterContract: (body) => request('/admin/contracts', { method: 'POST', body }),
   adminDeployContract: (formData) => request('/admin/contracts/deploy', { method: 'POST', body: formData }),
@@ -392,6 +395,9 @@ export const api = {
   initiateCoopTx: (id, body) => request(`/cooperatives/${id}/transactions`, { method: 'POST', body }),
   signPendingTx: (txId) => request(`/cooperatives/transactions/${txId}/sign`, { method: 'POST' }),
   getPendingTxs: (coopId) => request(`/cooperatives/${coopId}/pending`),
+  // Coupons
+  validateCoupon: (body) => request('/coupons/validate', { method: 'POST', body }),
+
   // Platform fee
   getFeePreview: (amount) => request(`/orders/fee-preview?amount=${amount}`),
   // Account alerts
@@ -404,4 +410,10 @@ export const api = {
   adminCreateAnnouncement: (body) => request('/announcements/admin', { method: 'POST', body }),
   adminUpdateAnnouncement: (id, body) => request(`/announcements/admin/${id}`, { method: 'PATCH', body }),
   adminDeleteAnnouncement: (id) => request(`/announcements/admin/${id}`, { method: 'DELETE' }),
+
+  // Two-Factor Authentication
+  setup2FA: () => request('/auth/2fa/setup', { method: 'POST' }),
+  verify2FA: (body) => request('/auth/2fa/verify', { method: 'POST', body }),
+  get2FAStatus: () => request('/auth/2fa/status'),
+  disable2FA: () => request('/auth/2fa/disable', { method: 'POST' }),
 };

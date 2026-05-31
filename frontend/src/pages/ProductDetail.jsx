@@ -69,6 +69,24 @@ const s = {
   navBtn:        { background: 'rgba(0,0,0,0.35)', color: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' },
 };
 
+function CopyButton({ url }) {
+  const [copied, setCopied] = useState(false);
+  function handleCopy() {
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+  return (
+    <button
+      style={{ ...{ background: '#2d6a4f', color: '#fff', border: 'none', borderRadius: 8, padding: '9px 20px', cursor: 'pointer', fontWeight: 600, fontSize: 14, width: '100%' } }}
+      onClick={handleCopy}
+    >
+      {copied ? 'Copied!' : 'Copy link'}
+    </button>
+  );
+}
+
 export default function ProductDetail() {
   const { t } = useTranslation();
   const { id } = useParams();
@@ -843,17 +861,6 @@ export default function ProductDetail() {
         })()}
 
         <PriceHistoryChart data={priceHistory} />
-        <div style={s.price}>
-          {unitPrice} XLM{" "}
-          <span style={{ fontSize: 14, fontWeight: 400 }}>
-            / {product.unit}
-          </span>
-          {tiers.length > 0 && (
-            <span style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
-              (bulk pricing available)
-            </span>
-          )}
-        </div>
         {usd(unitPrice) && (
           <div style={{ fontSize: 13, color: '#888', marginBottom: 4 }}>
             {usd(unitPrice)} {t('productDetail.perUnit', { unit: product.unit })} <span style={{ fontSize: 11, color: '#bbb' }}>{t('productDetail.approxRate')}</span>
@@ -1067,30 +1074,67 @@ export default function ProductDetail() {
         })()}
 
         {/* Availability Calendar */}
-        {calendar.length > 0 && (
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#333', marginBottom: 8 }}>📅 Weekly Availability</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {calendar.map(w => (
-                <button
-                  key={w.week_start}
-                  disabled={!w.available}
-                  onClick={() => w.available && setSelectedWeek(w.week_start)}
-                  style={{
-                    padding: '5px 10px', borderRadius: 6, fontSize: 12, cursor: w.available ? 'pointer' : 'not-allowed',
-                    border: selectedWeek === w.week_start ? '2px solid #2d6a4f' : '1px solid #ddd',
-                    background: !w.available ? '#f5f5f5' : selectedWeek === w.week_start ? '#d8f3dc' : '#fff',
-                    color: !w.available ? '#bbb' : '#333',
-                    fontWeight: selectedWeek === w.week_start ? 700 : 400,
-                  }}
-                >
-                  {w.available ? '' : '✗ '}{new Date(w.week_start + 'T00:00:00Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                </button>
-              ))}
+        {calendar.length > 0 && (() => {
+          // Build a set of available week_start dates for quick lookup
+          const availableWeeks = new Set(calendar.filter(w => w.available).map(w => w.week_start));
+          // Determine the month to display: month of the first week in the calendar
+          const firstDate = new Date(calendar[0].week_start + 'T00:00:00Z');
+          const year = firstDate.getUTCFullYear();
+          const month = firstDate.getUTCMonth();
+          const monthLabel = firstDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+          // Days in month
+          const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+          // Day of week for the 1st (0=Sun)
+          const firstDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
+          // For each day, find which week_start (Monday) it belongs to
+          function getMondayOf(y, m, d) {
+            const date = new Date(Date.UTC(y, m, d));
+            const dow = date.getUTCDay(); // 0=Sun
+            const diff = dow === 0 ? -6 : 1 - dow;
+            const mon = new Date(date);
+            mon.setUTCDate(date.getUTCDate() + diff);
+            return mon.toISOString().slice(0, 10);
+          }
+          const cells = [];
+          for (let i = 0; i < firstDow; i++) cells.push(null); // leading blanks
+          for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+          return (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#333', marginBottom: 8 }}>📅 Availability — {monthLabel}</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, maxWidth: 280 }}>
+                {['Su','Mo','Tu','We','Th','Fr','Sa'].map(d => (
+                  <div key={d} style={{ textAlign: 'center', fontSize: 11, color: '#888', fontWeight: 600, padding: '2px 0' }}>{d}</div>
+                ))}
+                {cells.map((day, i) => {
+                  if (!day) return <div key={`blank-${i}`} />;
+                  const weekKey = getMondayOf(year, month, day);
+                  const isAvail = availableWeeks.has(weekKey);
+                  const isSelected = selectedWeek === weekKey;
+                  return (
+                    <button
+                      key={day}
+                      disabled={!isAvail}
+                      onClick={() => isAvail && setSelectedWeek(weekKey)}
+                      title={isAvail ? `Week of ${weekKey}` : 'Unavailable'}
+                      style={{
+                        padding: '4px 0', borderRadius: 4, fontSize: 12, cursor: isAvail ? 'pointer' : 'default',
+                        border: isSelected ? '2px solid #2d6a4f' : '1px solid transparent',
+                        background: !isAvail ? '#f5f5f5' : isSelected ? '#d8f3dc' : '#e8f5e9',
+                        color: !isAvail ? '#ccc' : isSelected ? '#1b4332' : '#2d6a4f',
+                        fontWeight: isSelected ? 700 : 400,
+                      }}
+                    >{day}</button>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', gap: 12, marginTop: 8, fontSize: 11, color: '#888' }}>
+                <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#e8f5e9', border: '1px solid #b7e4c7', borderRadius: 2, marginRight: 4 }} />Available</span>
+                <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#f5f5f5', borderRadius: 2, marginRight: 4 }} />Unavailable</span>
+              </div>
+              {selectedWeek && <div style={{ fontSize: 12, color: '#2d6a4f', marginTop: 4 }}>Week of {selectedWeek} selected</div>}
             </div>
-            {selectedWeek && <div style={{ fontSize: 12, color: '#2d6a4f', marginTop: 4 }}>Week of {selectedWeek} selected</div>}
-          </div>
-        )}
+          );
+        })()}
 
         {currentStock === 0 ? (
           <div>
@@ -1128,24 +1172,20 @@ export default function ProductDetail() {
             </button>
             {paymentLinkError && <div style={{ ...s.err, marginTop: 8 }}>{paymentLinkError}</div>}
             {paymentLinkData && (
-              <div style={{ marginTop: 16, padding: 12, border: '1px solid #ddd', borderRadius: 8, background: '#f9fff9' }}>
-                <div style={{ marginBottom: 8, fontWeight: 600 }}>SEP-0007 Payment Link</div>
-                <a href={paymentLinkData.paymentLink} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all', color: '#1b4332' }}>
-                  {paymentLinkData.paymentLink}
-                </a>
-                <div style={{ marginTop: 8, fontSize: 12, color: '#555' }}>
-                  Expires at: {new Date(paymentLinkData.expiresAt).toLocaleString()}
+              <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+                <div style={{ background: '#fff', borderRadius: 12, padding: 24, maxWidth: 360, width: '90%', boxShadow: '0 4px 24px #0003' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <div style={{ fontWeight: 700, fontSize: 16, color: '#2d6a4f' }}>SEP-0007 Payment Link</div>
+                    <button onClick={() => setPaymentLinkData(null)} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#888' }} aria-label="Close">✕</button>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16 }}>
+                    <QRCode value={paymentLinkData.paymentLink} size={200} />
+                  </div>
+                  <CopyButton url={paymentLinkData.paymentLink} />
+                  <div style={{ marginTop: 8, fontSize: 12, color: '#888', textAlign: 'center' }}>
+                    Expires: {new Date(paymentLinkData.expiresAt).toLocaleString()}
+                  </div>
                 </div>
-                <div style={{ marginTop: 12 }}>
-                  <img
-                    src={api.getOrderPaymentLinkQr(paymentLinkData.orderId)}
-                    alt="Payment link QR"
-                    style={{ width: 220, height: 220, borderRadius: 10, border: '1px solid #e0e0e0' }}
-                  />
-                </div>
-                <button style={{ ...s.btnSm, marginTop: 8 }} onClick={() => navigator.clipboard.writeText(paymentLinkData.paymentLink)}>
-                  Copy payment link
-                </button>
               </div>
             )}
             <style>{`@keyframes spin { to { transform: rotate(360deg); } } .spinner-sm { display: inline-block; }`}</style>

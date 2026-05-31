@@ -9,6 +9,20 @@ const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const app = require('../app');
 
+jest.mock('../middleware/auth', () => {
+  const jwt = require('jsonwebtoken');
+  return (req, res, next) => {
+    const header = req.headers['authorization'];
+    if (!header) return res.status(401).json({ error: 'unauthorized' });
+    try {
+      req.user = jwt.verify(header.replace('Bearer ', ''), process.env.JWT_SECRET);
+      next();
+    } catch {
+      res.status(401).json({ error: 'unauthorized' });
+    }
+  };
+});
+
 const mockDb = jest.requireMock('../db/schema');
 const stellar = jest.requireMock('../utils/stellar');
 
@@ -402,6 +416,159 @@ describe('PWYW min_price validation', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [farmer], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ quantity: 9, low_stock_threshold: 5, low_stock_alerted: 0 }], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('paid');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Flash sale time-window enforcement
+// ---------------------------------------------------------------------------
+describe('Flash sale time-window enforcement', () => {
+  const now = Date.now();
+  const past = new Date(now - 60_000).toISOString();   // 1 min ago
+  const future = new Date(now + 60_000).toISOString(); // 1 min from now
+  const farFuture = new Date(now + 3_600_000).toISOString(); // 1 hr from now
+
+  // Flash sale product active right now
+  const activeFlashProduct = {
+    ...product,
+    flash_sale_price: 2.5,
+    flash_sale_starts_at: past,
+    flash_sale_ends_at: farFuture,
+  };
+
+  function mockSuccessfulFlashOrder(prod) {
+    stellar.getBalance.mockResolvedValueOnce(9999);
+    stellar.sendPayment.mockResolvedValueOnce('FLASH_TX_HASH');
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [prod], rowCount: 1 })   // product lookup
+      .mockResolvedValueOnce({ rows: [buyer], rowCount: 1 })  // buyer lookup
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })       // stock decrement
+      .mockResolvedValueOnce({ rows: [{ id: 200 }], rowCount: 1 }) // INSERT order
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })       // UPDATE paid
+      .mockResolvedValueOnce({ rows: [farmer], rowCount: 1 }) // farmer lookup
+      .mockResolvedValueOnce({ rows: [{ quantity: 8, low_stock_threshold: 5, low_stock_alerted: 0 }], rowCount: 1 }); // low-stock
+  }
+
+  it('allows order when flash sale is currently active', async () => {
+    mockSuccessfulFlashOrder(activeFlashProduct);
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('paid');
+  });
+
+  it('returns 422 flash_sale_not_started when sale has not begun yet', async () => {
+    const notStartedProduct = {
+      ...product,
+      flash_sale_price: 2.5,
+      flash_sale_starts_at: future,   // starts in the future
+      flash_sale_ends_at: farFuture,
+    };
+
+    mockDb.query.mockResolvedValueOnce({ rows: [notStartedProduct], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('flash_sale_not_started');
+  });
+
+  it('returns 422 flash_sale_ended when sale window has passed', async () => {
+    const expiredProduct = {
+      ...product,
+      flash_sale_price: 2.5,
+      flash_sale_starts_at: null,
+      flash_sale_ends_at: past,  // ended in the past
+    };
+
+    mockDb.query.mockResolvedValueOnce({ rows: [expiredProduct], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('flash_sale_ended');
+  });
+
+  it('rejects even when client sends no timing data (server time is authoritative)', async () => {
+    // Simulate a client-side manipulation attempt: the product DB record shows
+    // the sale has ended, regardless of what the client believes.
+    const expiredProduct = {
+      ...product,
+      flash_sale_price: 2.5,
+      flash_sale_starts_at: null,
+      flash_sale_ends_at: past,
+    };
+
+    mockDb.query.mockResolvedValueOnce({ rows: [expiredProduct], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      // Client does not send any flash-sale timing fields — server still rejects
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('flash_sale_ended');
+  });
+
+  it('skips flash sale validation for normal products (no flash_sale_price)', async () => {
+    // Normal product — should proceed to payment without any flash-sale check
+    mockSuccessfulFlashOrder(product); // product has no flash_sale_price
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('paid');
+  });
+
+  it('skips flash sale validation when flash_sale_price is set but flash_sale_ends_at is null', async () => {
+    const incompleteFlashProduct = {
+      ...product,
+      flash_sale_price: 2.5,
+      flash_sale_ends_at: null, // no end time → not a valid flash sale
+    };
+
+    mockSuccessfulFlashOrder(incompleteFlashProduct);
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('paid');
+  });
+
+  it('allows order when flash_sale_starts_at is null (no start restriction)', async () => {
+    const noStartProduct = {
+      ...product,
+      flash_sale_price: 2.5,
+      flash_sale_starts_at: null,  // no start restriction
+      flash_sale_ends_at: farFuture,
+    };
+
+    mockSuccessfulFlashOrder(noStartProduct);
 
     const res = await request(app)
       .post('/api/orders')

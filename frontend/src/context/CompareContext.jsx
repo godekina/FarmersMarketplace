@@ -59,7 +59,7 @@ export function CompareProvider({ children }) {
     setProducts(prev => {
       if (prev.some(p => p.id === product.id)) return prev;
       const next = [...prev, product];
-      return next.length > 3 ? next.slice(1) : next;
+      return next.length > 4 ? next.slice(1) : next;
     });
   }, []);
 
@@ -72,7 +72,7 @@ export function CompareProvider({ children }) {
       const exists = prev.some(p => p.id === product.id);
       if (exists) return prev.filter(p => p.id !== product.id);
       const next = [...prev, product];
-      return next.length > 3 ? next.slice(1) : next;
+      return next.length > 4 ? next.slice(1) : next;
     });
   }, []);
 

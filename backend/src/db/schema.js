@@ -84,7 +84,9 @@ if (USE_POSTGRES) {
 
   let sqlite;
   try {
-    sqlite = new Database(path.join(__dirname, '../../market.db'));
+    sqlite = new Database(path.join(__dirname, '../../market.db'), {
+      timeout: parseInt(process.env.DB_QUERY_TIMEOUT_SQLITE || '5000', 10),
+    });
   } catch (err) {
     console.error('[DB] Failed to open SQLite database:', err.message);
     process.exit(1);
@@ -236,10 +238,12 @@ try { db.exec(`ALTER TABLE products ADD COLUMN low_stock_alerted INTEGER DEFAULT
       escrow_status TEXT DEFAULT 'none',
       address_id INTEGER,
       fee_bumped INTEGER DEFAULT 0,
+      bundle_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (buyer_id) REFERENCES users(id),
       FOREIGN KEY (product_id) REFERENCES products(id),
-      FOREIGN KEY (address_id) REFERENCES addresses(id)
+      FOREIGN KEY (address_id) REFERENCES addresses(id),
+      FOREIGN KEY (bundle_id) REFERENCES bundles(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS refresh_tokens (
