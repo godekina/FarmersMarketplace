@@ -19,6 +19,8 @@ pub enum EscrowError {
     TimeoutNotReached = 7,
     InvalidWasmHash   = 8,
     NoPendingAdmin    = 9,
+    /// Provided token does not match the token used at deposit time.
+    InvalidToken      = 8,
 }
 
 #[derive(Clone, PartialEq)]
@@ -35,6 +37,8 @@ pub enum EscrowStatus {
 pub enum DataKey {
     /// Per-escrow data — stored in persistent storage with individual TTL.
     Escrow(u64),
+    /// Per-escrow token address (stored separately so token used at deposit is enforced at release).
+    Token(u64),
     /// Contract metadata — stored in instance storage (shared TTL is fine).
     Admin,
     /// Contract metadata — stored in instance storage (shared TTL is fine).
@@ -95,6 +99,8 @@ impl EscrowContract {
             timeout_unix,
             status: EscrowStatus::Active,
         };
+        // Persist the token used for this escrow so releases/refunds must use the same token contract.
+        env.storage().persistent().set(&DataKey::Token(order_id), &xlm_token);
         env.storage().persistent().set(&DataKey::Escrow(order_id), &escrow);
         env.storage().persistent().extend_ttl(&DataKey::Escrow(order_id), TTL_MIN, TTL_MAX);
         Ok(())
@@ -128,6 +134,15 @@ impl EscrowContract {
                 return Err(EscrowError::InDispute);
             }
             EscrowStatus::Active => {}
+        }
+
+        let stored_token: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(order_id))
+            .ok_or(EscrowError::NotFound)?;
+        if stored_token != xlm_token {
+            return Err(EscrowError::InvalidToken);
         }
 
         let token_client = token::Client::new(&env, &xlm_token);
@@ -178,6 +193,15 @@ impl EscrowContract {
         }
         if env.ledger().timestamp() < escrow.timeout_unix {
             return Err(EscrowError::TimeoutNotReached);
+        }
+
+        let stored_token: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(order_id))
+            .ok_or(EscrowError::NotFound)?;
+        if stored_token != xlm_token {
+            return Err(EscrowError::InvalidToken);
         }
 
         let token_client = token::Client::new(&env, &xlm_token);
@@ -236,6 +260,15 @@ impl EscrowContract {
 
         if escrow.status != EscrowStatus::Disputed {
             panic!("escrow is not in dispute");
+        }
+
+        let stored_token: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(order_id))
+            .expect("token not set for escrow");
+        if stored_token != xlm_token {
+            panic!("provided token does not match stored escrow token");
         }
 
         let token_client = token::Client::new(&env, &xlm_token);
