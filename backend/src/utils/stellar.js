@@ -1,6 +1,8 @@
 const StellarSdk = require('@stellar/stellar-sdk');
 const bip39 = require('bip39');
 const StellarHDWallet = require('stellar-hd-wallet');
+const crypto = require('crypto');
+const db = require('../db/schema');
 
 const STELLAR_NETWORK = (process.env.STELLAR_NETWORK || 'testnet').toLowerCase();
 
@@ -655,6 +657,56 @@ async function simulateContractCall(contractId, method, args = []) {
   return { success: true, fee, result: decoded, error: null };
 }
 
+/**
+ * Compute a stable SHA-256 hash of the contract call arguments for logging.
+ * @param {*} args  Any JSON-serialisable value.
+ * @returns {string} Hex digest (first 16 bytes = 32 hex chars).
+ */
+function hashArgs(args) {
+  try {
+    const json = JSON.stringify(args);
+    return crypto.createHash('sha256').update(json).digest('hex').slice(0, 32);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist a contract invocation record to the contract_invocations table (#692).
+ * Non-fatal — a logging failure must never break the caller.
+ *
+ * @param {object} opts
+ * @param {string}  opts.contractId
+ * @param {string}  opts.method
+ * @param {*}       opts.args        Raw args object (will be JSON-serialised).
+ * @param {string|null} opts.txHash
+ * @param {boolean} opts.success
+ * @param {string|null} opts.error
+ * @param {number|null} opts.userId
+ */
+async function logEscrowInvocation({ contractId, method, args, txHash, success, error, userId }) {
+  try {
+    const argsHash = hashArgs(args);
+    await db.query(
+      `INSERT INTO contract_invocations
+         (contract_id, method, args, result, tx_hash, success, error, invoked_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        contractId,
+        method,
+        args != null ? JSON.stringify(args) : null,
+        argsHash,          // store the args hash in the result column for quick lookup
+        txHash || null,
+        success ? 1 : 0,
+        error || null,
+        userId || null,
+      ],
+    );
+  } catch {
+    // Non-fatal — logging must never break the escrow flow.
+  }
+}
+
 async function invokeEscrowContract({
   action,
   senderSecret,
@@ -663,6 +715,7 @@ async function invokeEscrowContract({
   farmerPublicKey,
   amount,
   timeoutUnix,
+  userId,   // optional — passed through for audit logging
 }) {
   const contractId = process.env.SOROBAN_ESCROW_CONTRACT_ID;
   const xlmTokenContractId = process.env.SOROBAN_XLM_TOKEN_CONTRACT_ID;
@@ -680,6 +733,9 @@ async function invokeEscrowContract({
     (isTestnet ? 'https://soroban-testnet.stellar.org' : 'https://soroban.stellar.org');
   const sorobanServer = new StellarSdk.SorobanRpc.Server(sorobanRpcUrl);
   const contract = new StellarSdk.Contract(contractId);
+
+  // Build the args object used for logging (human-readable, no secrets).
+  const logArgs = { action, orderId, buyerPublicKey, farmerPublicKey, amount, timeoutUnix };
 
   let operation;
   if (action === 'deposit') {
@@ -726,24 +782,77 @@ async function invokeEscrowContract({
   tx = await sorobanServer.prepareTransaction(tx);
   tx.sign(keypair);
 
-  const sendResult = await sorobanServer.sendTransaction(tx);
+  let sendResult;
+  try {
+    sendResult = await sorobanServer.sendTransaction(tx);
+  } catch (submitErr) {
+    await logEscrowInvocation({
+      contractId,
+      method: action,
+      args: logArgs,
+      txHash: null,
+      success: false,
+      error: submitErr.message,
+      userId,
+    });
+    throw submitErr;
+  }
+
   if (sendResult.status === 'ERROR') {
-    throw new Error(sendResult.errorResultXdr || 'Soroban transaction submission failed');
+    const errMsg = sendResult.errorResultXdr || 'Soroban transaction submission failed';
+    await logEscrowInvocation({
+      contractId,
+      method: action,
+      args: logArgs,
+      txHash: null,
+      success: false,
+      error: errMsg,
+      userId,
+    });
+    throw new Error(errMsg);
   }
 
   const hash = sendResult.hash || tx.hash().toString('hex');
   for (let i = 0; i < 15; i += 1) {
     const txResult = await sorobanServer.getTransaction(hash);
     if (txResult.status === 'SUCCESS') {
+      await logEscrowInvocation({
+        contractId,
+        method: action,
+        args: logArgs,
+        txHash: hash,
+        success: true,
+        error: null,
+        userId,
+      });
       return { txHash: hash, contractId };
     }
     if (txResult.status === 'FAILED') {
+      await logEscrowInvocation({
+        contractId,
+        method: action,
+        args: logArgs,
+        txHash: hash,
+        success: false,
+        error: 'Soroban transaction failed',
+        userId,
+      });
       throw new Error('Soroban transaction failed');
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
-  throw new Error('Soroban transaction confirmation timed out');
+  const timeoutErr = 'Soroban transaction confirmation timed out';
+  await logEscrowInvocation({
+    contractId,
+    method: action,
+    args: logArgs,
+    txHash: hash,
+    success: false,
+    error: timeoutErr,
+    userId,
+  });
+  throw new Error(timeoutErr);
 }
 
 // Resolve a federation address (e.g. farmer*farmersmarket.io) to a Stellar public key.

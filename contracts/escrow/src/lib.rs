@@ -1,7 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, token, Address, Env, Vec};
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, token, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, token, Address, BytesN, Env, Vec};
 
 // TTL thresholds for persistent escrow entries (~57–115 days at 5 s/ledger).
 const TTL_MIN: u32 = 100_000;
@@ -21,7 +20,9 @@ pub enum EscrowError {
     InvalidWasmHash   = 8,
     NoPendingAdmin    = 9,
     /// Provided token does not match the token used at deposit time.
-    InvalidToken      = 8,
+    InvalidToken      = 10,
+    /// A v1 EscrowRecord entry could not be migrated to v2 Escrow.
+    MigrationFailed   = 11,
 }
 
 #[derive(Clone, PartialEq)]
@@ -64,6 +65,20 @@ pub struct Escrow {
     pub amount: i128,
     pub timeout_unix: u64,
     pub status: EscrowStatus,
+}
+
+// ---------------------------------------------------------------------------
+// v1 schema — kept for migration purposes only (#691).
+// The original contract stored EscrowRecord (no `status`, no `token` field).
+// ---------------------------------------------------------------------------
+#[contracttype]
+#[derive(Clone)]
+pub struct EscrowRecord {
+    pub buyer: Address,
+    pub farmer: Address,
+    pub amount: i128,
+    pub timeout_unix: u64,
+    pub released: bool,
 }
 
 #[contract]
@@ -401,6 +416,87 @@ impl EscrowContract {
     /// Read-only view: returns the escrow state for `order_id`, or `None` if it does not exist.
     pub fn get_escrow(env: Env, order_id: u64) -> Option<Escrow> {
         env.storage().persistent().get(&DataKey::Escrow(order_id))
+    }
+
+    // -----------------------------------------------------------------------
+    // migrate — v1 → v2 schema migration (#691)
+    //
+    // Reads each `order_id` in `order_ids` from persistent storage.  If the
+    // entry deserialises as a v1 `EscrowRecord` (no `status` field, `released`
+    // bool), it is rewritten as a v2 `Escrow` with:
+    //   • status = EscrowStatus::Active   (released=false entries)
+    //   • status = EscrowStatus::Released (released=true  entries)
+    //   • token  = `fallback_token`       (v1 had no per-escrow token)
+    //
+    // Already-migrated entries (those that already deserialise as `Escrow`)
+    // are left untouched.  The function is admin-only and idempotent.
+    //
+    // Returns the number of entries that were actually rewritten.
+    // -----------------------------------------------------------------------
+    pub fn migrate(
+        env: Env,
+        order_ids: Vec<u64>,
+        fallback_token: Address,
+    ) -> Result<u32, EscrowError> {
+        // Only the current admin may trigger a migration.
+        let transfer: AdminTransfer = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin not set");
+        transfer.current_admin.require_auth();
+
+        let mut migrated: u32 = 0;
+
+        for order_id in order_ids.iter() {
+            let key = DataKey::Escrow(order_id);
+
+            // Skip if no entry exists at all.
+            if !env.storage().persistent().has(&key) {
+                continue;
+            }
+
+            // Attempt to read as the new v2 Escrow first.  If that succeeds
+            // the entry is already migrated — skip it.
+            let already_v2: Option<Escrow> = env.storage().persistent().get(&key);
+            if already_v2.is_some() {
+                continue;
+            }
+
+            // Try to read as the old v1 EscrowRecord.
+            let record: EscrowRecord = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(EscrowError::MigrationFailed)?;
+
+            let status = if record.released {
+                EscrowStatus::Released
+            } else {
+                EscrowStatus::Active
+            };
+
+            let new_escrow = Escrow {
+                buyer: record.buyer,
+                farmer: record.farmer,
+                token: fallback_token.clone(),
+                amount: record.amount,
+                timeout_unix: record.timeout_unix,
+                status,
+            };
+
+            env.storage().persistent().set(&key, &new_escrow);
+            env.storage().persistent().extend_ttl(&key, TTL_MIN, TTL_MAX);
+
+            env.events().publish(
+                ("escrow", "migrated", order_id),
+                (),
+            );
+
+            migrated += 1;
+        }
+
+        Ok(migrated)
     }
 }
 
