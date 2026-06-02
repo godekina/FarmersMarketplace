@@ -6,10 +6,10 @@
 //!   #475 - Idiomatic DataKey enum for stable serialisation across SDK versions.
 //!   #483 - approve / transfer_from / burn_from support.
 //!   #685 - Optional burn-on-transfer fee, configurable by admin.
+//!   #696 - Total supply cap: max_supply set at init, mint rejects overflow, remaining_supply() exposed.
 
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String};
 
 #[contracttype]
 #[derive(Clone)]
@@ -32,6 +32,8 @@ pub enum DataKey {
     Vesting(Address, u32),
     /// Global vesting period in ledgers (#693).
     VestingPeriod,
+    /// Maximum mintable supply cap (#696). Set once at initialize; 0 = uncapped.
+    MaxSupply,
 }
 
 /// A single vesting lock created at mint time (#693).
@@ -42,13 +44,6 @@ pub struct VestingEntry {
     pub locked_amount: i128,
     /// Ledger sequence number at which the tokens become transferable.
     pub unlock_ledger: u32,
-}
-
-#[contract]
-pub struct RewardToken;
-
-    /// Transfer fee in basis points (0-10000). 100 bps = 1%. (#685)
-    TransferFeeBps,
 }
 
 #[contracttype]
@@ -70,13 +65,19 @@ pub struct RewardToken;
 
 #[contractimpl]
 impl RewardToken {
-    pub fn initialize(env: Env, admin: Address, decimal: u32, name: String, symbol: String) {
+    /// Initialise the token.  `max_supply` is the hard cap on total mintable
+    /// tokens (#696).  Pass `0` to leave the supply uncapped.
+    pub fn initialize(env: Env, admin: Address, decimal: u32, name: String, symbol: String, max_supply: i128) {
         if env.storage().instance().has(&DataKey::Metadata) {
             panic!("already initialized");
+        }
+        if max_supply < 0 {
+            panic!("max_supply must be non-negative");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::TotalSupply, &0_i128);
         env.storage().instance().set(&DataKey::TransferFeeBps, &0_u32);
+        env.storage().instance().set(&DataKey::MaxSupply, &max_supply);
         env.storage().instance().set(
             &DataKey::Metadata,
             &TokenMetadata { decimal, name, symbol },
@@ -86,7 +87,6 @@ impl RewardToken {
     // TTL buffer added on top of the vesting period when extending vesting entry TTL.
     const fn vesting_ttl_buffer() -> u32 { 10_000 }
 
-    pub fn mint(env: Env, to: Address, amount: i128) {
     /// Sets the burn-on-transfer fee in basis points (#685).
     /// 0 = disabled, 100 = 1%, 10000 = 100% (max).
     /// Only the admin may call this.
@@ -111,6 +111,14 @@ impl RewardToken {
         if amount <= 0 {
             panic!("amount must be positive");
         }
+
+        // #696 — enforce total supply cap if one is set.
+        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        let max_supply: i128 = env.storage().instance().get(&DataKey::MaxSupply).unwrap_or(0);
+        if max_supply > 0 && supply + amount > max_supply {
+            panic!("mint would exceed max_supply cap");
+        }
+
         let balance = Self::balance(env.clone(), to.clone());
         env.storage().persistent().set(&DataKey::Balance(to.clone()), &(balance + amount));
 
@@ -174,9 +182,6 @@ impl RewardToken {
             }
         }
         (total - locked).max(0)
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
-        env.events().publish(("mint", to), amount);
     }
 
     pub fn burn(env: Env, from: Address, amount: i128) {
@@ -345,25 +350,10 @@ impl RewardToken {
         env.storage()
             .persistent()
             .set(&DataKey::Balance(to.clone()), &(to_balance + amount));
-        let fee_bps: u32 = env.storage().instance().get(&DataKey::TransferFeeBps).unwrap_or(0);
-        let burn_amount: i128 = if fee_bps > 0 { amount * fee_bps as i128 / 10_000 } else { 0 };
-        let net_amount = amount - burn_amount;
 
-        env.storage().persistent().set(&DataKey::Balance(from.clone()), &(from_balance - amount));
-
-        let to_balance = Self::balance(env.clone(), to.clone());
-        env.storage().persistent().set(&DataKey::Balance(to.clone()), &(to_balance + net_amount));
-
-        if burn_amount > 0 {
-            let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-            env.storage().instance().set(&DataKey::TotalSupply, &(supply - burn_amount));
-            env.events().publish(("transfer_burn", from.clone()), burn_amount);
-        }
-
-        env.events().publish(("transfer_from", spender, from, to), amount);
+        env.events().publish(("transfer_vested", from, to), amount);
     }
 
-    /// Approve `spender` to spend up to `amount` tokens from `from` (#483).
     /// Allow the admin to update the token name and symbol (#690).
     /// Emits a `metadata_updated` event on success.
     pub fn update_metadata(env: Env, name: String, symbol: String) {
@@ -425,6 +415,22 @@ impl RewardToken {
         metadata.symbol
     }
 
+    /// Returns the maximum mintable supply cap (#696).  0 means uncapped.
+    pub fn max_supply(env: Env) -> i128 {
+        env.storage().instance().get(&DataKey::MaxSupply).unwrap_or(0)
+    }
+
+    /// Returns how many tokens can still be minted before hitting the cap (#696).
+    /// Returns `i128::MAX` when the supply is uncapped.
+    pub fn remaining_supply(env: Env) -> i128 {
+        let max: i128 = env.storage().instance().get(&DataKey::MaxSupply).unwrap_or(0);
+        if max == 0 {
+            return i128::MAX;
+        }
+        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        (max - supply).max(0)
+    }
+
     pub fn propose_admin(env: Env, new_admin: Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -449,7 +455,7 @@ mod test {
         let contract_id = env.register_contract(None, RewardToken);
         let client = RewardTokenClient::new(env, &contract_id);
         let admin = Address::generate(env);
-        client.initialize(&admin, &7, &String::from_str(env, "Farmers Reward"), &String::from_str(env, "FRT"));
+        client.initialize(&admin, &7, &String::from_str(env, "Farmers Reward"), &String::from_str(env, "FRT"), &0);
         (client, admin)
     }
 

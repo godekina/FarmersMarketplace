@@ -7,12 +7,14 @@
  *   - Any transfer > 1000 XLM                   → alert type: large_transfer
  *
  * Creates a contract_alerts row and emails the admin on each new alert.
+ * Also sends push notifications to admin for failed_invocations alerts (#698).
  * Implements exponential backoff retry on RPC failures (max 5 retries, cap 5 minutes).
  */
 
 const db = require('../db/schema');
 const { getContractEvents } = require('../utils/stellar');
 const mailer = require('../utils/mailer');
+const { sendPushToUser } = require('../utils/pushNotifications');
 const logger = require('../logger');
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -26,6 +28,13 @@ async function getAdminEmail() {
     `SELECT email FROM users WHERE role = 'admin' LIMIT 1`
   );
   return rows[0]?.email || null;
+}
+
+async function getAdminId() {
+  const { rows } = await db.query(
+    `SELECT id FROM users WHERE role = 'admin' LIMIT 1`
+  );
+  return rows[0]?.id || null;
 }
 
 async function createAlert(contract_id, alert_type, message) {
@@ -45,14 +54,31 @@ async function createAlert(contract_id, alert_type, message) {
     [contract_id, alert_type, message]
   );
 
+  const alert = inserted[0];
+
+  // Email admin
   const adminEmail = await getAdminEmail();
   if (adminEmail) {
-    await mailer.sendContractAlert({ to: adminEmail, alert: inserted[0] }).catch((e) =>
-      console.error('[ContractMonitor] Email failed:', e.message)
+    await mailer.sendContractAlert({ to: adminEmail, alert }).catch((e) =>
+      logger.error('[ContractMonitor] Email failed:', e.message)
     );
   }
 
-  return inserted[0];
+  // #698 — push notification for failed invocations and monitored events
+  if (alert_type === 'failed_invocations' || alert_type === 'contract_event') {
+    const adminId = await getAdminId();
+    if (adminId) {
+      await sendPushToUser(adminId, {
+        title: 'Contract Alert',
+        body: message,
+        data: { alert_type, contract_id },
+      }).catch((e) =>
+        logger.error('[ContractMonitor] Push notification failed:', e.message)
+      );
+    }
+  }
+
+  return alert;
 }
 
 async function monitorContract(contractId, retryCount = 0) {
@@ -155,12 +181,50 @@ async function monitorContract(contractId, retryCount = 0) {
   }
 }
 
+/**
+ * #698 — Query contract_alerts for unacknowledged failed_invocations and
+ * contract_event rows created in the last poll window, and send push
+ * notifications to the admin for each one.
+ */
+async function processUnacknowledgedAlerts() {
+  try {
+    const { rows: alerts } = await db.query(
+      `SELECT id, contract_id, alert_type, message
+       FROM contract_alerts
+       WHERE acknowledged = 0
+         AND alert_type IN ('failed_invocations', 'contract_event')
+       ORDER BY created_at DESC
+       LIMIT 50`
+    );
+
+    if (!alerts.length) return;
+
+    const adminId = await getAdminId();
+    if (!adminId) return;
+
+    for (const alert of alerts) {
+      await sendPushToUser(adminId, {
+        title: 'Contract Alert',
+        body: alert.message,
+        data: { alert_type: alert.alert_type, contract_id: alert.contract_id },
+      }).catch((e) =>
+        logger.error('[ContractMonitor] Push failed for alert', alert.id, e.message)
+      );
+    }
+  } catch (err) {
+    logger.error('[ContractMonitor] processUnacknowledgedAlerts error:', err.message);
+  }
+}
+
 async function runMonitoringJob() {
   try {
     const { rows: contracts } = await db.query(
       `SELECT contract_id FROM contracts_registry`
     );
     await Promise.all(contracts.map((c) => monitorContract(c.contract_id)));
+
+    // #698 — query contract_alerts for any unacknowledged alerts and push-notify admin
+    await processUnacknowledgedAlerts();
   } catch (err) {
     logger.error('[ContractMonitor] Job error:', err.message);
   }

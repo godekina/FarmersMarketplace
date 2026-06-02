@@ -413,9 +413,20 @@ impl EscrowContract {
             .ok_or(EscrowError::NotFound)
     }
 
-    /// Read-only view: returns the escrow state for `order_id`, or `None` if it does not exist.
+    /// Read-only view: returns the full Escrow struct for `order_id` (#697).
+    /// Returns `None` if the escrow does not exist. No auth required.
     pub fn get_escrow(env: Env, order_id: u64) -> Option<Escrow> {
         env.storage().persistent().get(&DataKey::Escrow(order_id))
+    }
+
+    /// Read-only view: returns `true` if the escrow for `order_id` has been
+    /// settled (Released or Refunded), `false` if Active or Disputed (#697).
+    /// Returns `false` for unknown order IDs. No auth required.
+    pub fn is_settled(env: Env, order_id: u64) -> bool {
+        match env.storage().persistent().get::<DataKey, Escrow>(&DataKey::Escrow(order_id)) {
+            Some(escrow) => matches!(escrow.status, EscrowStatus::Released | EscrowStatus::Refunded),
+            None => false,
+        }
     }
 
     // -----------------------------------------------------------------------
