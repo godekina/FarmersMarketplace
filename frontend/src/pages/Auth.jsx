@@ -55,8 +55,10 @@ export function LoginPage() {
   const passwordRef = React.useRef(null);
 
   function handleChange(field, value) {
-    setForm(f => ({ ...f, [field]: value }));
-    if (errors[field]) setErrors(e => ({ ...e, [field]: '' }));
+    const updatedForm = { ...form, [field]: value };
+    setForm(updatedForm);
+    const fieldErrors = validateLogin(updatedForm);
+    setErrors((prev) => ({ ...prev, [field]: fieldErrors[field] || '' }));
   }
 
   async function handleSubmit(e) {
@@ -94,6 +96,7 @@ export function LoginPage() {
             <label style={s.label} htmlFor="login-password">{t('auth.password')}</label>
             <input id="login-password" ref={passwordRef} style={errors.password ? s.inputErr : s.input} type="password"
               value={form.password} onChange={e => handleChange('password', e.target.value)} autoComplete="current-password" />
+            <PasswordStrength password={form.password} />
             {errors.password && <div style={s.err} role="alert">{errors.password}</div>}
           </div>
           {formError && <div style={s.formErr} role="alert">{formError}</div>}
@@ -117,8 +120,10 @@ export function RegisterPage() {
   const refCode = searchParams.get('ref');
 
   function handleChange(field, value) {
-    setForm(f => ({ ...f, [field]: value }));
-    if (errors[field]) setErrors(e => ({ ...e, [field]: '' }));
+    const updatedForm = { ...form, [field]: value };
+    setForm(updatedForm);
+    const fieldErrors = validateRegister(updatedForm);
+    setErrors((prev) => ({ ...prev, [field]: fieldErrors[field] || '' }));
   }
 
   async function handleSubmit(e) {
