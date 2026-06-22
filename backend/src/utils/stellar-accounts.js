@@ -6,11 +6,18 @@ const { StellarSdk, isTestnet, server, networkPassphrase } = require('./stellar-
 const _federationCache = new Map();
 const FEDERATION_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+/**
+ * @returns {{ publicKey: string, secretKey: string }}
+ */
 function createWallet() {
   const keypair = StellarSdk.Keypair.random();
   return { publicKey: keypair.publicKey(), secretKey: keypair.secret() };
 }
 
+/**
+ * Generates a fresh 24-word BIP-39 mnemonic and derives the first Stellar keypair.
+ * @returns {{ mnemonic: string, publicKey: string, secretKey: string }}
+ */
 function createWalletFromMnemonic() {
   const mnemonic = bip39.generateMnemonic(256); // 24-word phrase
   const wallet = StellarHDWallet.fromMnemonic(mnemonic);
@@ -18,6 +25,11 @@ function createWalletFromMnemonic() {
   return { mnemonic, publicKey: keypair.publicKey(), secretKey: keypair.secret() };
 }
 
+/**
+ * Re-derives the Stellar keypair (account index 0) from an existing BIP-39 mnemonic.
+ * @param {string} mnemonic
+ * @returns {{ publicKey: string, secretKey: string }}
+ */
 function deriveKeypairFromMnemonic(mnemonic) {
   if (!bip39.validateMnemonic(mnemonic)) throw new Error('Invalid mnemonic phrase');
   const wallet = StellarHDWallet.fromMnemonic(mnemonic);
@@ -30,6 +42,11 @@ async function fundTestnetAccount(publicKey) {
   return response.json();
 }
 
+/**
+ * Returns the native XLM balance of an account, or 0 if the account does not exist.
+ * @param {string} publicKey
+ * @returns {Promise<number>}
+ */
 async function getBalance(publicKey) {
   try {
     const account = await server.loadAccount(publicKey);
@@ -40,6 +57,11 @@ async function getBalance(publicKey) {
   }
 }
 
+/**
+ * Returns all asset balances for an account, or [] if the account does not exist.
+ * @param {string} publicKey
+ * @returns {Promise<Array<{asset_type:string, asset_code:string, asset_issuer:string|null, balance:number, limit:number|null}>>}
+ */
 async function getAllBalances(publicKey) {
   try {
     const account = await server.loadAccount(publicKey);
@@ -55,6 +77,11 @@ async function getAllBalances(publicKey) {
   }
 }
 
+/**
+ * Adds a trustline for a non-native asset, enabling the account to hold it.
+ * @param {{ secret: string, assetCode: string, assetIssuer: string }} params
+ * @returns {Promise<string>} Transaction hash
+ */
 async function addTrustline({ secret, assetCode, assetIssuer }) {
   const keypair = StellarSdk.Keypair.fromSecret(secret);
   const account = await server.loadAccount(keypair.publicKey());
@@ -68,6 +95,11 @@ async function addTrustline({ secret, assetCode, assetIssuer }) {
   return result.hash;
 }
 
+/**
+ * Removes a trustline (sets limit to 0). Throws with code `non_zero_balance` if the account still holds the asset.
+ * @param {{ secret: string, assetCode: string, assetIssuer: string }} params
+ * @returns {Promise<string>} Transaction hash
+ */
 async function removeTrustline({ secret, assetCode, assetIssuer }) {
   const keypair = StellarSdk.Keypair.fromSecret(secret);
   const account = await server.loadAccount(keypair.publicKey());
@@ -89,6 +121,12 @@ async function removeTrustline({ secret, assetCode, assetIssuer }) {
   return result.hash;
 }
 
+/**
+ * Merges the source account into the destination, transferring all remaining XLM.
+ * Throws with code `destination_not_found` if the destination account is not on the ledger.
+ * @param {{ sourceSecret: string, destinationPublicKey: string }} params
+ * @returns {Promise<string>} Transaction hash
+ */
 async function mergeAccount({ sourceSecret, destinationPublicKey }) {
   const sourceKeypair = StellarSdk.Keypair.fromSecret(sourceSecret);
   try {
@@ -111,6 +149,12 @@ async function mergeAccount({ sourceSecret, destinationPublicKey }) {
   return result.hash;
 }
 
+/**
+ * Resolves a Stellar public key to its federation address (e.g. `alice*farmersmarket.io`).
+ * Results are cached in memory for 10 minutes. Returns null if not registered.
+ * @param {string} publicKey
+ * @returns {Promise<string|null>}
+ */
 async function lookupFederationAddress(publicKey) {
   if (!publicKey) return null;
   const cached = _federationCache.get(publicKey);
@@ -126,6 +170,14 @@ async function lookupFederationAddress(publicKey) {
   }
 }
 
+/**
+ * Resolves a federation address (e.g. `alice*farmersmarket.io`) to a Stellar public key.
+ * If the address has no `*`, it is returned as-is (assumed to already be a public key).
+ * Local domain addresses are resolved against the `users` table; others via the Stellar Federation protocol.
+ * @param {string} address
+ * @param {object} db  better-sqlite3 database instance
+ * @returns {Promise<string>} Stellar public key
+ */
 async function resolveFederationAddress(address, db) {
   if (!address || !address.includes('*')) return address;
   const [username, domain] = address.split('*');

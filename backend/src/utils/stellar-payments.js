@@ -15,6 +15,13 @@ async function wrapWithFeeBump(innerTx, feeAccountSecret) {
   return feeBumpTx;
 }
 
+/**
+ * Sends XLM from one account to another, splitting off the platform fee when configured.
+ * Wraps the transaction in a fee-bump if the sender's balance is below `FEE_BUMP_THRESHOLD_XLM`.
+ * @param {{ senderSecret: string, receiverPublicKey: string, amount: number, memo?: string }} params
+ * @returns {Promise<string>} Transaction hash
+ * @throws {{ code: 'account_not_found' }} if the sender account is not funded
+ */
 async function sendPayment({ senderSecret, receiverPublicKey, amount, memo }) {
   const senderKeypair = StellarSdk.Keypair.fromSecret(senderSecret);
   let senderAccount;
@@ -78,6 +85,12 @@ async function sendPayment({ senderSecret, receiverPublicKey, amount, memo }) {
   return result.hash;
 }
 
+/**
+ * Fetches the native-XLM payment history for an account, newest first.
+ * @param {string} publicKey
+ * @param {{ cursor?: string, limit?: number }} [opts]
+ * @returns {Promise<{ records: object[], next_cursor: string|null, prev_cursor: string|null }>}
+ */
 async function getTransactions(publicKey, { cursor, limit = 20 } = {}) {
   try {
     let call = server.payments().forAccount(publicKey).order('desc').limit(Math.min(limit, 200));
@@ -106,6 +119,11 @@ async function getTransactions(publicKey, { cursor, limit = 20 } = {}) {
   }
 }
 
+/**
+ * Builds a `web+stellar:pay?…` URI for wallet deep-linking.
+ * @param {{ destination: string, amount: number|string, assetCode: string, assetIssuer: string, memo?: string }} params
+ * @returns {string}
+ */
 function generatePaymentLink({ destination, amount, assetCode, assetIssuer, memo }) {
   const params = new URLSearchParams({
     destination,
@@ -117,6 +135,12 @@ function generatePaymentLink({ destination, amount, assetCode, assetIssuer, memo
   return `web+stellar:pay?${params.toString()}`;
 }
 
+/**
+ * Computes the platform fee split for a given XLM amount.
+ * Returns zero-fee info when `PLATFORM_FEE_PERCENT` or `PLATFORM_WALLET_PUBLIC_KEY` are not set.
+ * @param {number} amount
+ * @returns {{ feePercent: number, feeAmount: number, farmerAmount: number, platformWallet: string|null }}
+ */
 function getPlatformFeeInfo(amount) {
   const feePercent = parseFloat(process.env.PLATFORM_FEE_PERCENT || '0');
   const platformWallet = process.env.PLATFORM_WALLET_PUBLIC_KEY || null;
@@ -128,6 +152,12 @@ function getPlatformFeeInfo(amount) {
   return { feePercent, feeAmount, farmerAmount, platformWallet };
 }
 
+/**
+ * Queries Horizon for the best path to receive `destAmount` XLM by spending `sourceAssetCode`.
+ * @param {{ sourceAssetCode: string, sourceAssetIssuer?: string, destAmount: number|string }} params
+ * @returns {Promise<{ sourceAmount: number, path: object[] }>}
+ * @throws {{ code: 'no_path' }} if no DEX path exists
+ */
 async function getPathPaymentEstimate({ sourceAssetCode, sourceAssetIssuer, destAmount }) {
   const sourceAsset =
     sourceAssetCode === 'XLM'
@@ -171,6 +201,12 @@ async function pathPayment({ senderSecret, sourceAssetCode, sourceAssetIssuer, s
   return result.hash;
 }
 
+/**
+ * Creates an on-ledger claimable balance (escrow-lite).
+ * Farmer can claim unconditionally; buyer can reclaim after 14 days if unclaimed.
+ * @param {{ senderSecret: string, farmerPublicKey: string, buyerPublicKey: string, amount: number }} params
+ * @returns {Promise<{ txHash: string, balanceId: string }>}
+ */
 async function createClaimableBalance({ senderSecret, farmerPublicKey, buyerPublicKey, amount }) {
   const senderKeypair = StellarSdk.Keypair.fromSecret(senderSecret);
   const senderAccount = await server.loadAccount(senderKeypair.publicKey());
@@ -208,6 +244,11 @@ async function createClaimableBalance({ senderSecret, farmerPublicKey, buyerPubl
   return { txHash: result.hash, balanceId: balance.id };
 }
 
+/**
+ * Claims an existing claimable balance on behalf of the claimant.
+ * @param {{ claimantSecret: string, balanceId: string }} params
+ * @returns {Promise<string>} Transaction hash
+ */
 async function claimBalance({ claimantSecret, balanceId }) {
   const claimantKeypair = StellarSdk.Keypair.fromSecret(claimantSecret);
   const claimantAccount = await server.loadAccount(claimantKeypair.publicKey());
@@ -220,6 +261,11 @@ async function claimBalance({ claimantSecret, balanceId }) {
   return result.hash;
 }
 
+/**
+ * Creates a preorder claimable balance that the farmer can only claim after `unlockAtUnix`.
+ * @param {{ senderSecret: string, farmerPublicKey: string, amount: number, unlockAtUnix: number }} params
+ * @returns {Promise<{ txHash: string, balanceId: string }>}
+ */
 async function createPreorderClaimableBalance({ senderSecret, farmerPublicKey, amount, unlockAtUnix }) {
   const senderKeypair = StellarSdk.Keypair.fromSecret(senderSecret);
   const senderAccount = await server.loadAccount(senderKeypair.publicKey());
