@@ -1,6 +1,13 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { api } from '../api/client';
+import { useXlmRate } from '../utils/useXlmRate';
+import { useAuth } from '../context/AuthContext';
+import { useTranslation } from 'react-i18next';
+import { getErrorMessage } from '../utils/errorMessages';
+import ProductForm from '../components/dashboard/ProductForm';
+import FlashSaleManager from '../components/dashboard/FlashSaleManager';
+import AuctionManager from '../components/dashboard/AuctionManager';
 
 const s = {
   page: { maxWidth: 900, margin: '0 auto', padding: 16 },
@@ -16,63 +23,59 @@ const s = {
   product: { borderBottom: '1px solid #eee', padding: '12px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
   del: { background: '#fee', color: '#c0392b', border: 'none', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 12 },
   msg: { padding: '10px 14px', borderRadius: 8, marginBottom: 12, fontSize: 14 },
+  preview: { width: '100%', maxHeight: 240, objectFit: 'cover', borderRadius: 8, marginBottom: 8, display: 'block' },
+  uploading: { fontSize: 13, color: '#666', marginBottom: 4 },
+  removeImg: { background: 'none', border: '1px solid #ddd', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 12, color: '#c0392b', marginBottom: 8 },
+  uploadZone: { border: '2px dashed #ddd', borderRadius: 8, padding: '24px 16px', textAlign: 'center', cursor: 'pointer', color: '#888', fontSize: 14, marginBottom: 8 },
+  uploadZoneActive: { borderColor: '#2d6a4f', background: '#f0faf4' },
+  imgErr: { color: '#c0392b', fontSize: 12, marginBottom: 8 },
+  csvBtn: { background: '#2d6a4f', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 20px', cursor: 'pointer', fontWeight: 600, fontSize: 14 },
+  csvInput: { display: 'none' },
+  csvResult: { padding: '10px 14px', borderRadius: 8, marginBottom: 12, fontSize: 14 },
+  productThumb: { width: 48, height: 48, objectFit: 'cover', borderRadius: 6, marginRight: 10 },
+  galleryPanel: { marginTop: 12, padding: 16, background: '#f8fdf9', borderRadius: 8, border: '1px solid #b7e4c7' },
+  galleryGrid: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
+  galleryItem: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 },
+  galleryThumb: { width: 72, height: 72, objectFit: 'cover', borderRadius: 6, border: '2px solid transparent' },
+  galleryThumbFirst: { border: '2px solid #2d6a4f' },
+  arrowBtn: { background: '#f0f0f0', border: 'none', borderRadius: 4, padding: '3px 7px', cursor: 'pointer', fontSize: 12 },
+  imgDelBtn: { background: '#fee', border: 'none', borderRadius: 4, padding: '3px 7px', cursor: 'pointer', fontSize: 12, color: '#c0392b' },
+  address: { fontSize: 12, color: '#888', marginTop: 4 },
 };
-
-const EMPTY_FORM = {
-  name: '',
-  description: '',
-  price: '',
-  quantity: '',
-  unit: 'kg',
-  category: 'other',
-  min_order_quantity: '',
-  batch_id: '',
-  pricing_type: 'unit',
-  min_weight: '',
-  max_weight: '',
-  pricing_model: 'fixed',
-  min_price: '',
-  is_preorder: false,
-  preorder_delivery_date: '',
-  allergens: [],
-  allowed_regions: [],
-  nutrition: {
-    calories: '',
-    protein: '',
-    carbs: '',
-    fat: '',
-    fiber: '',
-    vitamins: {},
-  },
-  harvest_date: '',
-  best_before: '',
-  available_from: '',
-  available_until: '',
-};
-
-import { useAuth } from '../context/AuthContext';
-import { useTranslation } from 'react-i18next';
-import { getErrorMessage } from '../utils/errorMessages';
 
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_SIZE_MB = 5;
 const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
+const MAX_IMAGES = 6;
+
+const STATUS_COLOR = {
+  pending: '#e67e22',
+  paid: '#2d6a4f',
+  processing: '#1a6b8a',
+  shipped: '#006d77',
+  delivered: '#2d6a4f',
+  cancelled: '#c0392b',
+  refunded: '#888',
+};
+const STATUS_ICON = {
+  pending: '⏳',
+  paid: '✅',
+  processing: '⚙️',
+  shipped: '📦',
+  delivered: '🎉',
+  cancelled: '❌',
+  refunded: '↩️',
+};
+const FARMER_STATUSES = ['processing', 'shipped', 'delivered', 'cancelled'];
 
 export default function Dashboard() {
   const { user } = useAuth();
   const { t } = useTranslation();
+  const { rate } = useXlmRate();
   const [products, setProducts] = useState([]);
-  const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [restockVals, setRestockVals] = useState({});
   const [harvestBatches, setHarvestBatches] = useState([]);
-  const [batchForm, setBatchForm] = useState({ batch_code: '', harvest_date: '', notes: '' });
-  const [batchMsg, setBatchMsg] = useState(null);
-  const [msg, setMsg] = useState(null);
-  const [auctionForm, setAuctionForm] = useState({ product_id: '', start_price: '', reserve_price: '', min_increment: '', ends_at: '' });
-  const [auctionMsg, setAuctionMsg] = useState(null);
-  const [activeAuction, setActiveAuction] = useState(null);
-  const [auctionBids, setAuctionBids] = useState([]);
-  const [endAuctionConfirm, setEndAuctionConfirm] = useState(false);
-  const [formErrors, setFormErrors] = useState({});
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [sales, setSales] = useState([]);
   const [salesMsg, setSalesMsg] = useState({});
   const [forecastByProduct, setForecastByProduct] = useState({});
@@ -80,8 +83,6 @@ export default function Dashboard() {
   const [videoUploadingByProduct, setVideoUploadingByProduct] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [flashSaleForm, setFlashSaleForm] = useState({ product_id: '', flash_sale_price: '', flash_sale_ends_at: '' });
-  const [flashSaleMsg, setFlashSaleMsg] = useState(null);
 
   // bulk price update state
   const [bulkPriceSelections, setBulkPriceSelections] = useState({}); // { [productId]: newPrice }
@@ -97,15 +98,6 @@ export default function Dashboard() {
   const [bundleDiscounts, setBundleDiscounts] = useState([]);
   const [bdForm, setBdForm] = useState({ min_products: '', discount_percent: '' });
   const [bdMsg, setBdMsg] = useState(null);
-
-  // image state
-  const [imageFile, setImageFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState(null);
-  const [imageUrl, setImageUrl] = useState(null);
-  const [imageErr, setImageErr] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
-  const fileInputRef = useRef(null);
 
   // profile state
   const [profile, setProfile]       = useState({ bio: '', location: '', avatar_url: '', federation_name: '', latitude: '', longitude: '', farm_address: '' });
@@ -251,8 +243,6 @@ export default function Dashboard() {
       setHarvestBatches(batchesRes?.data ?? []);
       setCoupons(couponsRes.data ?? []);
       const coops = coopsRes.data ?? [];
-      setCooperatives(coops);
-      setCoupons(couponsRes.data ?? []);
       setCooperatives(coopsRes.data ?? []);
 
       const forecastMap = {};
@@ -287,76 +277,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     load();
-    // Load current profile
-    if (user?.id) {
-      api.getFarmer(user.id)
-        .then(res => {
-          const d = res.data;
-          setProfile({ bio: d.bio || '', location: d.location || '', avatar_url: d.avatar_url || '', federation_name: d.federation_name || '', latitude: d.latitude ?? '', longitude: d.longitude ?? '', farm_address: d.farm_address || '' });
-          if (d.avatar_url) setAvatarPreview(d.avatar_url);
-        })
-        .catch(() => {});
-    }
   }, [user?.id]);
-
-  async function handleCreateBatch(e) {
-    e?.preventDefault?.();
-    setBatchMsg(null);
-    const code = batchForm.batch_code.trim();
-    const date = batchForm.harvest_date.trim();
-    if (!code || !date) {
-      setBatchMsg({ type: 'err', text: 'Batch code and harvest date are required.' });
-      return;
-    }
-    try {
-      await api.createHarvestBatch({
-        batch_code: code,
-        harvest_date: date,
-        notes: batchForm.notes.trim() || undefined,
-      });
-      setBatchForm({ batch_code: '', harvest_date: '', notes: '' });
-      setBatchMsg({ type: 'ok', text: 'Harvest batch created.' });
-      await load();
-    } catch (err) {
-      setBatchMsg({ type: 'err', text: getErrorMessage(err) });
-    }
-  }
-
-  function validateAndSetImage(file) {
-    setImageErr('');
-    if (!ALLOWED_TYPES.includes(file.type)) {
-      setImageErr('Only JPEG, PNG, or WebP images are allowed.');
-      return false;
-    }
-    if (file.size > MAX_SIZE_BYTES) {
-      setImageErr(`Image must be ${MAX_SIZE_MB} MB or smaller.`);
-      return false;
-    }
-    setImageFile(file);
-    setPreviewUrl(URL.createObjectURL(file));
-    setImageUrl(null); // reset confirmed URL until uploaded
-    return true;
-  }
-
-  function handleFileChange(e) {
-    const file = e.target.files?.[0];
-    if (file) validateAndSetImage(file);
-    e.target.value = ''; // allow re-selecting same file
-  }
-
-  function handleDrop(e) {
-    e.preventDefault();
-    setDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) validateAndSetImage(file);
-  }
-
-  function removeImage() {
-    setImageFile(null);
-    setPreviewUrl(null);
-    setImageUrl(null);
-    setImageErr('');
-  }
 
   async function handleProfileSave(e) {
     e.preventDefault();
@@ -395,151 +316,20 @@ export default function Dashboard() {
     }
   }
 
-  async function handleAdd(e) {
-    e.preventDefault();
-    setMsg(null);
-    setFormErrors({});
-    let finalImageUrl = imageUrl;
-
-    if (imageFile) {
-      setUploading(true);
-      try {
-        const res = await api.uploadImage(imageFile);
-        finalImageUrl = res.imageUrl;
-      } catch (err) {
-        setUploading(false);
-        setMsg({ type: 'err', text: `Image upload failed: ${err.message}` });
-        return;
-      }
-      setUploading(false);
-    }
-
-    try {
-      // Prepare nutrition data
-      const nutritionData = {};
-      if (form.nutrition.calories) nutritionData.calories = parseFloat(form.nutrition.calories);
-      if (form.nutrition.protein) nutritionData.protein = parseFloat(form.nutrition.protein);
-      if (form.nutrition.carbs) nutritionData.carbs = parseFloat(form.nutrition.carbs);
-      if (form.nutrition.fat) nutritionData.fat = parseFloat(form.nutrition.fat);
-      if (form.nutrition.fiber) nutritionData.fiber = parseFloat(form.nutrition.fiber);
-
-      const batchId = form.batch_id ? parseInt(form.batch_id, 10) : undefined;
-
-      await api.createProduct({
-        ...form,
-        price: parseFloat(form.price),
-        quantity: parseInt(form.quantity),
-        pricing_model: form.pricing_model,
-        min_price: form.pricing_model === 'pwyw' ? parseFloat(form.min_price) : undefined,
-        is_preorder: form.is_preorder ? 1 : 0,
-        preorder_delivery_date: form.is_preorder ? form.preorder_delivery_date : null,
-        image_url: finalImageUrl || undefined,
-        nutrition: Object.keys(nutritionData).length > 0 ? nutritionData : undefined,
-        pricing_type: form.pricing_type || 'unit',
-        min_weight: form.pricing_type === 'weight' ? parseFloat(form.min_weight) : undefined,
-        max_weight: form.pricing_type === 'weight' ? parseFloat(form.max_weight) : undefined,
-        min_order_quantity: form.min_order_quantity ? parseInt(form.min_order_quantity) : undefined,
-        allergens: form.allergens && form.allergens.length > 0 ? form.allergens : undefined,
-        allowed_regions: form.allowed_regions && form.allowed_regions.length > 0 ? form.allowed_regions : undefined,
-        available_from: form.available_from || undefined,
-        available_until: form.available_until || undefined,
-        batch_id: Number.isFinite(batchId) ? batchId : undefined,
-      });
-      setMsg({ type: 'ok', text: t('dashboard.productListedOk') });
-      setForm({ ...EMPTY_FORM });
-      removeImage();
-      load();
-    } catch (err) {
-      setMsg({ type: 'err', text: err.message });
-    }
-  }
-
   async function handleDelete(id) {
-    if (!confirm('Remove this product?')) return;
-    try { await api.deleteProduct(id); load(); } catch { /* ignore */ }
+    const product = products.find(p => p.id === id);
+    if (!product) return;
+    const openOrders = sales.filter(o => o.product_id === id && ['pending', 'paid', 'processing', 'shipped'].includes(o.status)).length;
+    setDeleteConfirm({ id, name: product.name, openOrders });
   }
 
-  const MIN_AUCTION_DURATION_MINUTES = 5;
-
-  function getAuctionMinDate() {
-    return new Date(Date.now() + MIN_AUCTION_DURATION_MINUTES * 60000).toISOString().slice(0, 16);
-  }
-
-  async function handleCreateAuction(e) {
-    e.preventDefault();
-    setAuctionMsg(null);
+  async function confirmDelete() {
+    if (!deleteConfirm) return;
     try {
-      const body = {
-        product_id: parseInt(auctionForm.product_id),
-        start_price: parseFloat(auctionForm.start_price),
-        ends_at: new Date(auctionForm.ends_at).toISOString(),
-      };
-      if (auctionForm.reserve_price) body.reserve_price = parseFloat(auctionForm.reserve_price);
-      if (auctionForm.min_increment) body.min_increment = parseFloat(auctionForm.min_increment);
-      const res = await api.createAuction(body);
-      setAuctionMsg({ type: 'ok', text: 'Auction created!' });
-      setAuctionForm({ product_id: '', start_price: '', reserve_price: '', min_increment: '', ends_at: '' });
-      // fetch the created auction for leaderboard
-      if (res.auctionId) {
-        const ar = await api.getAuction(res.auctionId);
-        setActiveAuction(ar.data);
-        loadBids(res.auctionId);
-      }
-    } catch (err) {
-      setAuctionMsg({ type: 'err', text: err.message });
-    }
-  }
-
-  async function loadBids(auctionId) {
-    try {
-      const res = await api.getAuctionBids(auctionId);
-      setAuctionBids(res.data ?? []);
+      await api.deleteProduct(deleteConfirm.id);
+      setDeleteConfirm(null);
+      load();
     } catch { /* ignore */ }
-  }
-
-  async function handleEndAuction() {
-    if (!activeAuction) return;
-    try {
-      await api.endAuction(activeAuction.id);
-      setActiveAuction(null);
-      setAuctionBids([]);
-      setEndAuctionConfirm(false);
-      setAuctionMsg({ type: 'ok', text: 'Auction ended.' });
-    } catch (err) {
-      setAuctionMsg({ type: 'err', text: err.message });
-    }
-  }
-
-  // Poll bids every 10s while there's an active auction
-  React.useEffect(() => {
-    if (!activeAuction) return;
-    const interval = setInterval(() => loadBids(activeAuction.id), 10000);
-    return () => clearInterval(interval);
-  }, [activeAuction?.id]);
-
-  async function handleSetFlashSale(e) {
-    e.preventDefault();
-    setFlashSaleMsg(null);
-    try {
-      const res = await api.setFlashSale(parseInt(flashSaleForm.product_id, 10), {
-        flash_sale_price: parseFloat(flashSaleForm.flash_sale_price),
-        flash_sale_ends_at: new Date(flashSaleForm.flash_sale_ends_at).toISOString(),
-      });
-      setFlashSaleMsg({ type: 'ok', text: `Flash sale set for product #${res.data.id}` });
-      await load();
-    } catch (e) {
-      setFlashSaleMsg({ type: 'err', text: getErrorMessage(e) });
-    }
-  }
-
-  async function handleCancelFlashSale(productId) {
-    try {
-      await api.cancelFlashSale(productId);
-      setFlashSaleMsg({ type: 'ok', text: `Flash sale canceled for product #${productId}` });
-      await load();
-    } catch (e) {
-      setFlashSaleMsg({ type: 'err', text: getErrorMessage(e) });
-    }
   }
 
   const [salesExportFrom, setSalesExportFrom] = React.useState('');
@@ -604,13 +394,138 @@ export default function Dashboard() {
     }
   }
 
+  async function handleRestock(productId) {
+    const qty = parseInt(restockVals[productId]);
+    if (!qty || qty <= 0) return;
+    try {
+      await api.restockProduct(productId, qty);
+      setRestockVals(prev => ({ ...prev, [productId]: '' }));
+      load();
+    } catch (e) {
+      alert(getErrorMessage(e));
+    }
+  }
+
+  async function handleStatusUpdate(orderId, status) {
+    try {
+      await api.updateOrderStatus(orderId, status);
+      setSalesMsg(prev => ({ ...prev, [orderId]: { type: 'ok', text: `Status updated to ${status}` } }));
+      load();
+    } catch (e) {
+      setSalesMsg(prev => ({ ...prev, [orderId]: { type: 'err', text: e.message } }));
+    }
+  }
+
+  async function handleGalleryMove(index, direction) {
+    const newImages = [...galleryImages];
+    const target = index + direction;
+    if (target < 0 || target >= newImages.length) return;
+    [newImages[index], newImages[target]] = [newImages[target], newImages[index]];
+    setGalleryImages(newImages);
+    try {
+      await api.reorderProductImages(galleryProductId, newImages.map(img => img.id));
+    } catch (e) {
+      setGalleryErr(getErrorMessage(e));
+    }
+  }
+
+  async function handleGalleryDelete(imageId) {
+    try {
+      await api.deleteProductImage(galleryProductId, imageId);
+      setGalleryImages(prev => prev.filter(img => img.id !== imageId));
+    } catch (e) {
+      setGalleryErr(getErrorMessage(e));
+    }
+  }
+
+  async function handleGalleryUpload(e) {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setGalleryUploading(true);
+    setGalleryErr('');
+    for (const file of files) {
+      if (!ALLOWED_TYPES.includes(file.type)) { setGalleryErr('Only JPEG, PNG, or WebP allowed.'); continue; }
+      if (file.size > MAX_SIZE_BYTES) { setGalleryErr(`Image must be ${MAX_SIZE_MB} MB or smaller.`); continue; }
+      try {
+        const res = await api.uploadProductImage(galleryProductId, file);
+        setGalleryImages(prev => [...prev, res.data]);
+      } catch (err) { setGalleryErr(getErrorMessage(err)); }
+    }
+    setGalleryUploading(false);
+    e.target.value = '';
+  }
+
+  function downloadCsvTemplate() {
+    const headers = ['name', 'description', 'price', 'quantity', 'unit', 'category'];
+    const example = ['Tomatoes', 'Fresh vine tomatoes', '2.5', '100', 'kg', 'vegetables'];
+    const csv = [headers.join(','), example.join(',')].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    Object.assign(document.createElement('a'), { href: url, download: 'products-template.csv' }).click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleCsvUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCsvUploading(true);
+    setCsvResult(null);
+    try {
+      const res = await api.uploadProductsCsv(file);
+      const { created, errors } = res.data ?? {};
+      setCsvResult({
+        type: errors?.length ? 'warn' : 'ok',
+        text: `Imported ${created ?? 0} product(s)${errors?.length ? ` with ${errors.length} error(s).` : ' successfully.'}`,
+        details: errors || [],
+      });
+      if (created > 0) load();
+    } catch (err) {
+      setCsvResult({ type: 'err', text: getErrorMessage(err) });
+    } finally {
+      setCsvUploading(false);
+      e.target.value = '';
+    }
+  }
+
   return (
     <div style={s.page}>
+      {deleteConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-modal-title"
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
+        >
+          <div style={{ background: '#fff', borderRadius: 12, padding: 28, maxWidth: 400, width: '90%', boxShadow: '0 4px 24px #0003' }}>
+            <div id="delete-modal-title" style={{ fontWeight: 700, fontSize: 17, marginBottom: 10, color: '#333' }}>
+              Delete {deleteConfirm.name}? This cannot be undone.
+            </div>
+            {deleteConfirm.openOrders > 0 && (
+              <p style={{ fontSize: 14, color: '#c0392b', marginBottom: 20 }}>
+                This product has {deleteConfirm.openOrders} open order{deleteConfirm.openOrders > 1 ? 's' : ''}. Deleting it may affect buyers.
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button onClick={() => setDeleteConfirm(null)} style={{ padding: '8px 18px', borderRadius: 8, border: '1px solid #ddd', background: '#fff', cursor: 'pointer', fontWeight: 600 }}>
+                Cancel
+              </button>
+              <button onClick={confirmDelete} style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: '#c0392b', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>
+                Confirm Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <Helmet>
         <title>Farmer Dashboard – Farmers Marketplace</title>
         <meta name="description" content="Manage your product listings, track sales, and grow your farm business on Farmers Marketplace." />
       </Helmet>
-      <div style={s.title}>🌾 Farmer Dashboard</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+        <div style={s.title}>🌾 Farmer Dashboard</div>
+        <div style={{ fontSize: 13, color: rate ? '#2d6a4f' : '#999', background: '#f0faf4', borderRadius: 8, padding: '6px 12px', fontWeight: 600 }}>
+          {rate ? `1 XLM ≈ $${rate.toFixed(4)} USDC` : 'Rate unavailable'}
+        </div>
+      </div>
 
       {/* Waitlist Analytics */}
       {waitlistAnalytics.length > 0 && (
@@ -647,39 +562,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div style={{ ...s.card, marginBottom: 24 }}>
-        <h3 style={{ marginBottom: 12, color: '#333' }}>Flash Sales</h3>
-        {flashSaleMsg && <div style={{ ...s.msg, background: flashSaleMsg.type === 'ok' ? '#d8f3dc' : '#fee', color: flashSaleMsg.type === 'ok' ? '#2d6a4f' : '#c0392b' }}>{flashSaleMsg.text}</div>}
-        <form onSubmit={handleSetFlashSale} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 10, alignItems: 'end' }}>
-          <div>
-            <label style={s.label}>Product</label>
-            <select style={s.input} value={flashSaleForm.product_id} onChange={(e) => setFlashSaleForm((f) => ({ ...f, product_id: e.target.value }))} required>
-              <option value="">Select product</option>
-              {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={s.label}>Flash Price (XLM)</label>
-            <input style={s.input} type="number" min="0" step="any" required value={flashSaleForm.flash_sale_price} onChange={(e) => setFlashSaleForm((f) => ({ ...f, flash_sale_price: e.target.value }))} />
-          </div>
-          <div>
-            <label style={s.label}>Ends At</label>
-            <input style={s.input} type="datetime-local" required value={flashSaleForm.flash_sale_ends_at} onChange={(e) => setFlashSaleForm((f) => ({ ...f, flash_sale_ends_at: e.target.value }))} />
-          </div>
-          <button type="submit" style={s.btn}>Set Flash Sale</button>
-        </form>
-
-        <div style={{ marginTop: 14 }}>
-          {products.filter((p) => p.flash_sale_price && p.flash_sale_ends_at).map((p) => (
-            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #eee', paddingTop: 10, marginTop: 10 }}>
-              <div style={{ fontSize: 14 }}>
-                <strong>{p.name}</strong> - {p.flash_sale_price} XLM until {new Date(p.flash_sale_ends_at).toLocaleString()}
-              </div>
-              <button type="button" style={{ ...s.btn, background: '#c0392b' }} onClick={() => handleCancelFlashSale(p.id)}>Cancel</button>
-            </div>
-          ))}
-        </div>
-      </div>
+      <FlashSaleManager products={products} onChanged={load} />
 
       {/* Bulk Price Update */}
       <div style={{ ...s.card, marginBottom: 24 }}>
@@ -734,390 +617,7 @@ export default function Dashboard() {
       </div>
 
       <div style={s.grid}>
-        <div style={s.card}>
-          <h3 style={{ marginBottom: 16, color: '#333' }}>Add New Product</h3>
-          {msg && <div style={{ ...s.msg, background: msg.type === 'ok' ? '#d8f3dc' : '#fee', color: msg.type === 'ok' ? '#2d6a4f' : '#c0392b' }}>{msg.text}</div>}
-          <form onSubmit={handleAdd}>
-            {[['name', 'Product Name', 'prod-name'], ['price', 'Price (XLM)', 'prod-price'], ['quantity', 'Quantity', 'prod-qty'], ['unit', 'Unit (kg, bunch, etc.)', 'prod-unit']].map(([key, label, id]) => (
-              <div key={key}>
-                <label style={s.label} htmlFor={id}>{label}</label>
-                <input id={id} style={s.input} value={form[key]} onChange={e => setForm({ ...form, [key]: e.target.value })} required={key !== 'unit'} />
-              </div>
-            ))}
-            <label style={s.label}>Description</label>
-            <textarea style={s.textarea} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
-            <label style={s.label}>Category</label>
-            <select style={s.input} value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}>
-              {['vegetables', 'fruits', 'grains', 'dairy', 'herbs', 'other'].map(c => (
-                <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
-              ))}
-            </select>
-            <label style={s.label}>Harvest batch (optional)</label>
-            <select style={s.input} value={form.batch_id} onChange={e => setForm({ ...form, batch_id: e.target.value })}>
-              <option value="">No batch</option>
-              {harvestBatches.map((b) => (
-                <option key={b.id} value={b.id}>{b.batch_code} — {b.harvest_date}</option>
-              ))}
-            </select>
-            {batchMsg && (
-              <div style={{ ...s.msg, marginBottom: 12, background: batchMsg.type === 'ok' ? '#d8f3dc' : '#fee', color: batchMsg.type === 'ok' ? '#2d6a4f' : '#c0392b' }}>
-                {batchMsg.text}
-              </div>
-            )}
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#555', marginBottom: 8 }}>Create new batch</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
-              <div>
-                <label style={s.label}>Batch code</label>
-                <input style={s.input} value={batchForm.batch_code} onChange={e => setBatchForm(f => ({ ...f, batch_code: e.target.value }))} placeholder="e.g. H-2026-03-A" />
-              </div>
-              <div>
-                <label style={s.label}>Harvest date</label>
-                <input style={s.input} type="date" value={batchForm.harvest_date} onChange={e => setBatchForm(f => ({ ...f, harvest_date: e.target.value }))} />
-              </div>
-              <div style={{ gridColumn: '1 / -1' }}>
-                <label style={s.label}>Notes (optional)</label>
-                <input style={s.input} value={batchForm.notes} onChange={e => setBatchForm(f => ({ ...f, notes: e.target.value }))} placeholder="Field block, variety…" />
-              </div>
-              <button type="button" style={{ ...s.btn, gridColumn: '1 / -1', justifySelf: 'start' }} onClick={handleCreateBatch}>Save batch</button>
-            </div>
-            <label style={s.label}>Pricing Type</label>
-            <select style={s.input} value={form.pricing_type || 'unit'} onChange={e => setForm({ ...form, pricing_type: e.target.value })}>
-              <option value="unit">Per unit / fixed quantity</option>
-              <option value="weight">By weight (price per kg/lb)</option>
-            </select>
-            {form.pricing_type === 'weight' && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div>
-                  <label style={s.label}>Min Weight ({form.unit || 'kg'})</label>
-                  <input style={s.input} type="number" min="0.001" step="any" value={form.min_weight || ''} onChange={e => setForm({ ...form, min_weight: e.target.value })} placeholder="e.g. 0.1" required />
-                </div>
-                <div>
-                  <label style={s.label}>Max Weight ({form.unit || 'kg'})</label>
-                  <input style={s.input} type="number" min="0.001" step="any" value={form.max_weight || ''} onChange={e => setForm({ ...form, max_weight: e.target.value })} placeholder="e.g. 10" required />
-                </div>
-              </div>
-            )}
-            <label style={s.label}>Min Order Quantity (MOQ)</label>
-            <input style={s.input} type="number" min="1" step="1" value={form.min_order_quantity || ''} onChange={e => setForm({ ...form, min_order_quantity: e.target.value })} placeholder="1 (default)" />
-            <label style={s.label}>Pricing Model</label>
-            <select style={s.input} value={form.pricing_model || 'fixed'} onChange={e => setForm({ ...form, pricing_model: e.target.value, min_price: e.target.value === 'pwyw' ? (form.min_price || '') : '' })}>
-              <option value="fixed">Fixed Price</option>
-              <option value="pwyw">Pay What You Want</option>
-              <option value="donation">Donation</option>
-            </select>
-            {form.pricing_model === 'pwyw' && (
-              <div style={{ marginBottom: 12 }}>
-                <label style={s.label}>Minimum Price (XLM)</label>
-                <input style={s.input} type="number" min="0" step="any" value={form.min_price} onChange={e => setForm({ ...form, min_price: e.target.value })} placeholder="e.g. 5" required />
-              </div>
-            )}
-            <button style={{ ...s.btn, width: '100%', marginTop: 8 }} type="submit" disabled={uploading}>
-              {uploading ? t('dashboard.uploading') : t('dashboard.listProduct')}
-            </button>
-
-            {/* Allergen selector */}
-            <div style={{ marginBottom: 12 }}>
-              <label style={s.label}>Allergens <span style={{ color: '#aaa', fontWeight: 400 }}>(select all that apply)</span></label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {['gluten', 'nuts', 'dairy', 'eggs', 'soy', 'shellfish'].map(a => {
-                  const selected = (form.allergens || []).includes(a);
-                  return (
-                    <button
-                      key={a}
-                      type="button"
-                      style={{
-                        padding: '5px 10px', borderRadius: 6, fontSize: 13, cursor: 'pointer',
-                        border: selected ? '1px solid #c0392b' : '1px solid #ddd',
-                        background: selected ? '#fee' : '#fff',
-                        color: selected ? '#c0392b' : '#555',
-                        fontWeight: selected ? 700 : 400,
-                      }}
-                      onClick={() => setForm(f => ({
-                        ...f,
-                        allergens: selected
-                          ? (f.allergens || []).filter(x => x !== a)
-                          : [...(f.allergens || []), a],
-                      }))}
-                      aria-pressed={selected}
-                    >
-                      {selected ? '✕ ' : ''}{a.charAt(0).toUpperCase() + a.slice(1)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Region restriction selector */}
-            <div style={{ marginBottom: 12 }}>
-              <label style={s.label}>Allowed Regions <span style={{ color: '#aaa', fontWeight: 400 }}>(leave empty for no restriction)</span></label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {[
-                  { code: 'US', label: '🇺🇸 US' }, { code: 'GB', label: '🇬🇧 GB' },
-                  { code: 'KE', label: '🇰🇪 KE' }, { code: 'NG', label: '🇳🇬 NG' },
-                  { code: 'ZA', label: '🇿🇦 ZA' }, { code: 'GH', label: '🇬🇭 GH' },
-                  { code: 'IN', label: '🇮🇳 IN' }, { code: 'AU', label: '🇦🇺 AU' },
-                  { code: 'CA', label: '🇨🇦 CA' }, { code: 'DE', label: '🇩🇪 DE' },
-                ].map(({ code, label }) => {
-                  const selected = (form.allowed_regions || []).includes(code);
-                  return (
-                    <button
-                      key={code}
-                      type="button"
-                      style={{
-                        padding: '5px 10px', borderRadius: 6, fontSize: 13, cursor: 'pointer',
-                        border: selected ? '1px solid #2d6a4f' : '1px solid #ddd',
-                        background: selected ? '#d8f3dc' : '#fff',
-                        color: selected ? '#2d6a4f' : '#555',
-                        fontWeight: selected ? 700 : 400,
-                      }}
-                      onClick={() => setForm(f => ({
-                        ...f,
-                        allowed_regions: selected
-                          ? (f.allowed_regions || []).filter(x => x !== code)
-                          : [...(f.allowed_regions || []), code],
-                      }))}
-                      aria-pressed={selected}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <button style={s.btn} type="submit">List Product</button>
-
-            <details style={{ marginTop: 16 }}>
-              <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 600, color: '#2d6a4f', marginBottom: 8 }}>
-                Nutritional Information (Optional)
-              </summary>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 12, marginTop: 8 }}>
-                <div>
-                  <label style={s.label}>Calories</label>
-                  <input
-                    style={{ ...s.input, borderColor: formErrors.nutrition?.calories ? '#c0392b' : '#ddd' }}
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={form.nutrition.calories}
-                    onChange={e => {
-                      setForm({
-                        ...form,
-                        nutrition: { ...form.nutrition, calories: e.target.value }
-                      });
-                      if (formErrors.nutrition?.calories) {
-                        setFormErrors({
-                          ...formErrors,
-                          nutrition: { ...formErrors.nutrition, calories: undefined }
-                        });
-                      }
-                    }}
-                    placeholder="e.g. 50"
-                  />
-                  {formErrors.nutrition?.calories && <div style={s.fieldErr}>{formErrors.nutrition.calories}</div>}
-                </div>
-                <div>
-                  <label style={s.label}>Protein (g)</label>
-                  <input
-                    style={{ ...s.input, borderColor: formErrors.nutrition?.protein ? '#c0392b' : '#ddd' }}
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={form.nutrition.protein}
-                    onChange={e => {
-                      setForm({
-                        ...form,
-                        nutrition: { ...form.nutrition, protein: e.target.value }
-                      });
-                      if (formErrors.nutrition?.protein) {
-                        setFormErrors({
-                          ...formErrors,
-                          nutrition: { ...formErrors.nutrition, protein: undefined }
-                        });
-                      }
-                    }}
-                    placeholder="e.g. 2.5"
-                  />
-                  {formErrors.nutrition?.protein && <div style={s.fieldErr}>{formErrors.nutrition.protein}</div>}
-                </div>
-                <div>
-                  <label style={s.label}>Carbs (g)</label>
-                  <input
-                    style={{ ...s.input, borderColor: formErrors.nutrition?.carbs ? '#c0392b' : '#ddd' }}
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={form.nutrition.carbs}
-                    onChange={e => {
-                      setForm({
-                        ...form,
-                        nutrition: { ...form.nutrition, carbs: e.target.value }
-                      });
-                      if (formErrors.nutrition?.carbs) {
-                        setFormErrors({
-                          ...formErrors,
-                          nutrition: { ...formErrors.nutrition, carbs: undefined }
-                        });
-                      }
-                    }}
-                    placeholder="e.g. 10"
-                  />
-                  {formErrors.nutrition?.carbs && <div style={s.fieldErr}>{formErrors.nutrition.carbs}</div>}
-                </div>
-                <div>
-                  <label style={s.label}>Fat (g)</label>
-                  <input
-                    style={{ ...s.input, borderColor: formErrors.nutrition?.fat ? '#c0392b' : '#ddd' }}
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={form.nutrition.fat}
-                    onChange={e => {
-                      setForm({
-                        ...form,
-                        nutrition: { ...form.nutrition, fat: e.target.value }
-                      });
-                      if (formErrors.nutrition?.fat) {
-                        setFormErrors({
-                          ...formErrors,
-                          nutrition: { ...formErrors.nutrition, fat: undefined }
-                        });
-                      }
-                    }}
-                    placeholder="e.g. 1.2"
-                  />
-                  {formErrors.nutrition?.fat && <div style={s.fieldErr}>{formErrors.nutrition.fat}</div>}
-                </div>
-                <div>
-                  <label style={s.label}>Fiber (g)</label>
-                  <input
-                    style={{ ...s.input, borderColor: formErrors.nutrition?.fiber ? '#c0392b' : '#ddd' }}
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={form.nutrition.fiber}
-                    onChange={e => {
-                      setForm({
-                        ...form,
-                        nutrition: { ...form.nutrition, fiber: e.target.value }
-                      });
-                      if (formErrors.nutrition?.fiber) {
-                        setFormErrors({
-                          ...formErrors,
-                          nutrition: { ...formErrors.nutrition, fiber: undefined }
-                        });
-                      }
-                    }}
-                    placeholder="e.g. 3"
-                  />
-                  {formErrors.nutrition?.fiber && <div style={s.fieldErr}>{formErrors.nutrition.fiber}</div>}
-                </div>
-              </div>
-            </details>
-
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '8px 0 10px', fontSize: 13, color: '#444' }}>
-              <input
-                type="checkbox"
-                checked={!!form.is_preorder}
-                onChange={e => setForm({
-                  ...form,
-                  is_preorder: e.target.checked,
-                  preorder_delivery_date: e.target.checked ? form.preorder_delivery_date : '',
-                })}
-              />
-              Mark as pre-order
-            </label>
-
-            {form.is_preorder && (
-              <>
-                <label style={s.label}>Expected Delivery Date</label>
-                <input
-                  style={formErrors.preorder_delivery_date ? s.inputErr : s.input}
-                  type="date"
-                  value={form.preorder_delivery_date}
-                  onChange={e => {
-                    setForm({ ...form, preorder_delivery_date: e.target.value });
-                    if (formErrors.preorder_delivery_date) setFormErrors(fe => ({ ...fe, preorder_delivery_date: '' }));
-                  }}
-                />
-                {formErrors.preorder_delivery_date && (
-                  <div style={s.fieldErr} role="alert">{formErrors.preorder_delivery_date}</div>
-                )}
-              </>
-            )}
-
-            <label style={s.label}>Harvest Date (optional)</label>
-            <input
-              style={s.input}
-              type="date"
-              value={form.harvest_date}
-              onChange={e => setForm({ ...form, harvest_date: e.target.value })}
-            />
-
-            <label style={s.label}>Best Before Date (optional)</label>
-            <input
-              style={s.input}
-              type="date"
-              value={form.best_before}
-              onChange={e => setForm({ ...form, best_before: e.target.value })}
-            />
-
-            <label style={s.label}>Available From (optional)</label>
-            <input
-              style={s.input}
-              type="datetime-local"
-              value={form.available_from}
-              onChange={e => setForm({ ...form, available_from: e.target.value })}
-            />
-
-            <label style={s.label}>Available Until (optional)</label>
-            <input
-              style={s.input}
-              type="datetime-local"
-              value={form.available_until}
-              onChange={e => setForm({ ...form, available_until: e.target.value })}
-            />
-
-            {/* Image upload */}
-            <label style={s.label}>{t('dashboard.productImage')} <span style={{ color: '#aaa', fontWeight: 400 }}>{t('dashboard.imageHint')}</span></label>
-
-            {previewUrl ? (
-              <>
-                <img src={previewUrl} alt="Preview" style={s.preview} />
-                {uploading && <div style={s.uploading}>{t('dashboard.uploading')}</div>}
-                <button type="button" style={s.removeImg} onClick={removeImage}>{t('dashboard.removeImage')}</button>
-              </>
-            ) : (
-              <div
-                style={{ ...s.uploadZone, ...(dragOver ? s.uploadZoneActive : {}) }}
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-                onDragLeave={() => setDragOver(false)}
-                onDrop={handleDrop}
-                role="button"
-                aria-label={t('dashboard.productImage')}
-                tabIndex={0}
-                onKeyDown={e => e.key === 'Enter' && fileInputRef.current?.click()}
-              >
-                📷 {t('dashboard.uploadImage')}
-              </div>
-            )}
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              style={{ display: 'none' }}
-              onChange={handleFileChange}
-            />
-
-            {imageErr && <div style={s.imgErr}>{imageErr}</div>}
-
-            <button style={s.btn} type="submit" disabled={uploading || Object.keys(formErrors).length > 0}>
-              {uploading ? t('dashboard.uploading') : t('dashboard.listProduct')}
-            </button>
-          </form>
-        </div>
+        <ProductForm harvestBatches={harvestBatches} onProductAdded={load} />
 
         <div style={s.card}>
           <h3 style={{ marginBottom: 16, color: '#333' }}>My Listings ({products.length})</h3>
@@ -1127,12 +627,6 @@ export default function Dashboard() {
           </div>
           {products.length === 0 && <p style={{ color: '#888', fontSize: 14 }}>No products yet. Add your first listing.</p>}
           {products.map(p => (
-            <div key={p.id} style={s.product}>
-              <div>
-                <div style={{ fontWeight: 600 }}>{p.name}</div>
-                <div style={{ fontSize: 13, color: '#666' }}>{p.price} XLM · {p.quantity} {p.unit}</div>
-              </div>
-              <button style={s.del} onClick={() => handleDelete(p.id)} aria-label={`Remove ${p.name}`}>Remove</button>
             <div key={p.id} style={{ ...s.product, flexDirection: 'column', alignItems: 'stretch' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div style={{ display: 'flex', alignItems: 'center' }}>
@@ -1141,10 +635,20 @@ export default function Dashboard() {
                     : <span style={{ fontSize: 28, marginRight: 10 }}>🥬</span>
                   }
                   <div>
-                    <div style={{ fontWeight: 600 }}>{p.name}</div>
+                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {p.name}
+                      {(p.is_preorder || p.is_preorder === 1) && (
+                        <span style={{ fontSize: 11, fontWeight: 700, background: '#e07b00', color: '#fff', borderRadius: 4, padding: '2px 7px', letterSpacing: 0.3 }}>Pre-order</span>
+                      )}
+                    </div>
                     <div style={{ fontSize: 13, color: '#666' }}>
                       {p.pricing_model === 'pwyw' ? `Min ${p.min_price} XLM (PWYW)` : p.pricing_model === 'donation' ? 'Donation' : `${p.price} XLM`} · {p.quantity} {p.unit}
                     </div>
+                    {(p.is_preorder || p.is_preorder === 1) && p.preorder_delivery_date && (
+                      <div style={{ fontSize: 12, color: '#e07b00', marginTop: 2 }}>
+                        📅 Delivery: {p.preorder_delivery_date}
+                      </div>
+                    )}
                     {forecastByProduct[p.id]?.note ? (
                       <div style={{ fontSize: 12, color: '#888' }}>{forecastByProduct[p.id].note}</div>
                     ) : forecastByProduct[p.id] ? (
@@ -1318,67 +822,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div style={{ ...s.card, marginTop: 24, maxWidth: 440 }}>
-        <h3 style={{ marginBottom: 16, color: '#333' }}>🔨 Create Auction</h3>
-        {auctionMsg && <div style={{ ...s.msg, background: auctionMsg.type === 'ok' ? '#d8f3dc' : '#fee', color: auctionMsg.type === 'ok' ? '#2d6a4f' : '#c0392b' }}>{auctionMsg.text}</div>}
-        <form onSubmit={handleCreateAuction}>
-          <label style={s.label}>Product</label>
-          <select style={s.input} value={auctionForm.product_id} onChange={e => setAuctionForm({ ...auctionForm, product_id: e.target.value })} required>
-            <option value="">Select a product</option>
-            {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-          <label style={s.label}>Starting Price (XLM)</label>
-          <input style={s.input} type="number" min="0.01" step="0.01" value={auctionForm.start_price} onChange={e => setAuctionForm({ ...auctionForm, start_price: e.target.value })} required />
-          <label style={s.label}>Reserve Price (XLM, optional)</label>
-          <input style={s.input} type="number" min="0" step="0.01" placeholder="Optional" value={auctionForm.reserve_price} onChange={e => setAuctionForm({ ...auctionForm, reserve_price: e.target.value })} />
-          <label style={s.label}>Min Increment (XLM, optional)</label>
-          <input style={s.input} type="number" min="0" step="0.01" placeholder="0" value={auctionForm.min_increment} onChange={e => setAuctionForm({ ...auctionForm, min_increment: e.target.value })} />
-          <label style={s.label}>Ends At</label>
-          <input style={s.input} type="datetime-local" min={getAuctionMinDate()} value={auctionForm.ends_at} onChange={e => setAuctionForm({ ...auctionForm, ends_at: e.target.value })} required />
-          <button style={{ ...s.btn, background: '#e07b00' }} type="submit">Create Auction</button>
-        </form>
-
-        {activeAuction && (
-          <div style={{ marginTop: 20 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <strong style={{ color: '#333' }}>📈 Live Bids — {activeAuction.product_name}</strong>
-              <button
-                style={{ ...s.btn, background: '#c0392b', fontSize: 12, padding: '5px 12px' }}
-                onClick={() => setEndAuctionConfirm(true)}
-              >End Early</button>
-            </div>
-            {endAuctionConfirm && (
-              <div style={{ background: '#fff3cd', border: '1px solid #ffc107', borderRadius: 8, padding: 12, marginBottom: 12 }}>
-                <div style={{ marginBottom: 8, fontSize: 13 }}>End auction now? The current highest bidder will win.</div>
-                <button style={{ ...s.btn, fontSize: 12, padding: '5px 12px', marginRight: 8 }} onClick={handleEndAuction}>Confirm</button>
-                <button style={{ ...s.btn, background: '#888', fontSize: 12, padding: '5px 12px' }} onClick={() => setEndAuctionConfirm(false)}>Cancel</button>
-              </div>
-            )}
-            {auctionBids.length === 0 ? (
-              <div style={{ fontSize: 13, color: '#888' }}>No bids yet.</div>
-            ) : (
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                <thead>
-                  <tr style={{ background: '#f5f5f5' }}>
-                    <th style={{ padding: '6px 8px', textAlign: 'left' }}>Bidder</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>Amount (XLM)</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'left' }}>Time</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {auctionBids.map((b, i) => (
-                    <tr key={i} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                      <td style={{ padding: '6px 8px' }}>{b.bidder}</td>
-                      <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600 }}>{b.amount}</td>
-                      <td style={{ padding: '6px 8px', color: '#888' }}>{new Date(b.placed_at).toLocaleTimeString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-      </div>
+      <AuctionManager products={products} />
 
       {/* CSV Bulk Upload */}
       <div style={{ ...s.card, marginTop: 24 }}>        <h3 style={{ marginBottom: 16, color: '#333' }}>📤 Bulk Upload Products</h3>

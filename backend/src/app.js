@@ -22,6 +22,7 @@ const { errorHandler } = require('./middleware/error');
 const { notFoundHandler } = require('./middleware/error');
 const { sanitizeResponse } = require('./middleware/sanitize');
 const requestLogger = require('./middleware/requestLogger');
+const categoriesRouter = require('./routes/categories');
 
 const app = express();
 
@@ -66,7 +67,14 @@ app.use(
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
-      callback(new Error('Not allowed by CORS'));
+      const msg = `CORS origin not allowed: ${origin}`;
+      if (process.env.NODE_ENV === 'production') {
+        logger.warn(msg);
+        return callback(new Error('Not allowed by CORS'));
+      }
+      // In non-production environments, log and allow for developer convenience
+      logger.debug(msg);
+      return callback(null, true);
     },
     credentials: true,
   })
@@ -90,6 +98,7 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use('/uploads/videos', express.static(path.join(__dirname, '../uploads/videos')));
 
 app.get('/api/csrf-token', csrfTokenHandler);
+app.use('/api/categories', categoriesRouter);
 
 // Interactive API documentation
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));

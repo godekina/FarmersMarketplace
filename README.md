@@ -244,7 +244,58 @@ npm run test:contracts
 | `TEST_HORIZON_URL` | `http://localhost:8000` | Local Horizon endpoint |
 | `TEST_SOROBAN_RPC_URL` | `http://localhost:8000/soroban/rpc` | Local Soroban RPC |
 | `TEST_NETWORK_PASSPHRASE` | `Standalone Network ; February 2017` | Local network passphrase |
-| `SKIP_CONTRACT_TESTS` | `false` | Set to `true` to skip in CI without Docker |
+| `SKIP_CONTRACT_TESTS` | `false` | Set to `true` to skip contract tests in CI without Docker |
+
+### SKIP_CONTRACT_TESTS
+
+Contract tests require a running local Stellar node (Docker). In CI environments where Docker is not available, set `SKIP_CONTRACT_TESTS=true` to skip the suite without failing the build:
+
+```bash
+SKIP_CONTRACT_TESTS=true npm run test:contracts
+```
+
+When skipped in CI, a warning is printed to the log so the omission is visible.
+
+A dedicated **nightly CI job** (`contract-tests-nightly` in `.github/workflows/ci.yml`) runs the full contract test suite on a schedule with Docker available, ensuring these tests are not silently broken.
+
+## Soroban Escrow Contract (`contract/`)
+
+The `contract/` directory contains a Soroban smart contract that provides on-chain escrow for marketplace orders.
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `deposit(order_id, buyer, farmer, amount, timeout_unix)` | Lock funds in escrow |
+| `release(order_id)` | Buyer releases funds to farmer |
+| `refund(order_id)` | Anyone refunds buyer after timeout |
+| `get_escrow(order_id)` | Read-only view of an escrow record |
+
+### Error Codes
+
+| Error | Meaning |
+|-------|---------|
+| `AlreadyExists` | Duplicate deposit for same order_id |
+| `NotFound` | No escrow record for order_id |
+| `Unauthorized` | Caller not permitted |
+| `NotTimedOut` | Refund called before timeout |
+| `AlreadySettled` | Escrow already released or refunded |
+| `InvalidParties` | buyer and farmer must be different addresses |
+
+### Build & Test
+
+```bash
+cd contract
+cargo test --features testutils
+cargo build --target wasm32-unknown-unknown --release
+```
+
+### Design Notes
+
+- **#468** — Every function that reads/writes an escrow entry calls `extend_ttl(TTL_MIN=100_000, TTL_MAX=200_000)` so entries never expire and lock funds.
+- **#469** — `deposit` rejects calls where `buyer == farmer` with `EscrowError::InvalidParties`.
+- **#470** — `deposit` panics if `timeout_unix` is not at least 1 hour (`3600 s`) in the future.
+- **#471** — `deposit`, `release`, and `refund` each emit a Soroban event so the backend can subscribe to the RPC event stream instead of polling.
 
 ## Notes
 

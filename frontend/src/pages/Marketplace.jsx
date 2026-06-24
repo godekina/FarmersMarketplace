@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, lazy, Suspense } from "react";
+import React, { useEffect, useState, useCallback, useRef, lazy, Suspense } from "react";
 import { useNavigate } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
 import { api } from "../api/client";
@@ -7,8 +7,9 @@ import { useFavorites } from "../context/FavoritesContext";
 import { useCompare } from "../context/CompareContext";
 import { useXlmRate } from "../utils/useXlmRate";
 import { useDebounce } from "../utils/useDebounce";
+import { getRecentlyViewed } from "../utils/recentlyViewed";
 import StarRating from "../components/StarRating";
-import Pagination from "../components/Pagination";
+import SkeletonProductCard from "../components/SkeletonProductCard";
 import Spinner from "../components/Spinner";
 import AuctionCard from "../components/AuctionCard";
 import FlashSaleCountdown from "../components/FlashSaleCountdown";
@@ -318,80 +319,178 @@ function getFreshnessBadge(bestBefore) {
   return { text: 'Fresh', color: '#4caf50' };
 }
 
+const SCROLL_KEY = 'marketplace_scroll';
+
 export default function Marketplace() {
   const { t } = useTranslation();
   const [products, setProducts] = useState([]);
   const [auctions, setAuctions] = useState([]);
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [page, setPage] = useState(1);
-  const [pagination, setPagination] = useState({ total: 0, totalPages: 1 });
+  const [hasMore, setHasMore] = useState(true);
   const [bundles, setBundles] = useState([]);
   const [bundleMsg, setBundleMsg] = useState({});
+  const [expandedBundles, setExpandedBundles] = useState({});
   const [recommendations, setRecommendations] = useState([]);
   const [recsLoading, setRecsLoading] = useState(false);
   const [viewMode, setViewMode] = useState("grid"); // 'grid' | 'map'
   const [geoLoading, setGeoLoading] = useState(false);
+  const [recentlyViewed, setRecentlyViewed] = useState([]);
   const navigate = useNavigate();
   const { user } = useAuth();
   const { isFavorited, toggleFavorite } = useFavorites();
-  const { products: compareProducts, toggleProduct, isCompared } = useCompare();
+  const { products: compareProducts, toggleProduct, isCompared, clearProducts } = useCompare();
   const { usd } = useXlmRate();
 
-  const debouncedSearch = useDebounce(filters.search, 400);
-  const debouncedSeller = useDebounce(filters.seller, 400);
+  const debouncedSearch = useDebounce(filters.search, 300);
+  const debouncedSeller = useDebounce(filters.seller, 300);
 
-  const load = useCallback(async (f, p = 1) => {
+  const abortRef = useRef(null);
+  const sentinelRef = useRef(null);
+  const observerRef = useRef(null);
+  const pageRef = useRef(1);
+  const hasMoreRef = useRef(true);
+  const filtersRef = useRef(filters);
+
+  // Keep filtersRef in sync
+  useEffect(() => { filtersRef.current = filters; }, [filters]);
+
+  async function fetchPage(f, p) {
+    let data, totalPages = 1;
+    if (f.search && f.search.trim()) {
+      const res = await api.searchProducts(f.search.trim());
+      data = res.data ?? res;
+      totalPages = 1;
+    } else {
+      const params = { page: p, limit: PAGE_SIZE };
+      if (f.category) params.category = f.category;
+      if (f.minPrice) params.minPrice = f.minPrice;
+      if (f.maxPrice && f.maxPrice < MAX_PRICE) params.maxPrice = f.maxPrice;
+      if (f.seller) params.seller = f.seller;
+      if (f.available) params.available = f.available;
+      if (f.sort && f.sort !== "newest") params.sort = f.sort;
+      if (f.lat && f.lng && f.radius) { params.lat = f.lat; params.lng = f.lng; params.radius = f.radius; }
+      const res = await api.getProducts(params);
+      data = res.data ?? [];
+      totalPages = res.totalPages ?? 1;
+    }
+    if (f.excludeAllergens && f.excludeAllergens.length > 0) {
+      data = data.filter(p => {
+        let allergens = [];
+        try { allergens = p.allergens ? JSON.parse(p.allergens) : []; } catch {}
+        return !f.excludeAllergens.some(a => allergens.includes(a));
+      });
+    }
+    return { data, totalPages };
+  }
+
+  // Initial load (resets list)
+  const load = useCallback(async (f) => {
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
+    setHasMore(true);
+    pageRef.current = 1;
+    hasMoreRef.current = true;
     try {
-      let data,
-        total = 0,
-        totalPages = 1;
-      if (f.search && f.search.trim()) {
-        const res = await api.searchProducts(f.search.trim());
-        data = res.data ?? res;
-        total = data.length;
-        totalPages = 1;
-      } else {
-        const params = { page: p, limit: PAGE_SIZE };
-        if (f.category) params.category = f.category;
-        if (f.minPrice) params.minPrice = f.minPrice;
-        if (f.maxPrice && f.maxPrice < MAX_PRICE) params.maxPrice = f.maxPrice;
-        if (f.seller) params.seller = f.seller;
-        if (f.available) params.available = f.available;
-        if (f.sort && f.sort !== "newest") params.sort = f.sort;
-        if (f.lat && f.lng && f.radius) {
-          params.lat = f.lat;
-          params.lng = f.lng;
-          params.radius = f.radius;
-        }
-        const res = await api.getProducts(params);
-        data = res.data ?? [];
-        total = res.total ?? 0;
-        totalPages = res.totalPages ?? 1;
-      }
-      // Client-side allergen exclusion filter
-      if (f.excludeAllergens && f.excludeAllergens.length > 0) {
-        data = data.filter(p => {
-          let allergens = [];
-          try { allergens = p.allergens ? JSON.parse(p.allergens) : []; } catch {}
-          return !f.excludeAllergens.some(a => allergens.includes(a));
-        });
-        total = data.length;
-      }
+      const { data, totalPages } = await fetchPage(f, 1);
+      if (controller.signal.aborted) return;
       setProducts(data);
-      setPagination({ total, totalPages });
+      pageRef.current = 1;
+      const more = totalPages > 1;
+      setHasMore(more);
+      hasMoreRef.current = more;
       const aucs = await api.getAuctions().catch(() => ({ data: [] }));
       setAuctions(aucs.data || []);
-    } catch {
-      setProducts([]);
+      // Save to sessionStorage for back-navigation restore
+      sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ products: data, page: 1, hasMore: more, filters: f }));
+    } catch (err) {
+      if (err?.name !== 'AbortError') setProducts([]);
     }
-    setLoading(false);
+    if (!controller.signal?.aborted) setLoading(false);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load next page (append)
+  const loadMore = useCallback(async () => {
+    if (!hasMoreRef.current || loadingMore) return;
+    setLoadingMore(true);
+    const nextPage = pageRef.current + 1;
+    try {
+      const { data, totalPages } = await fetchPage(filtersRef.current, nextPage);
+      setProducts(prev => {
+        const merged = [...prev, ...data];
+        sessionStorage.setItem(SCROLL_KEY, JSON.stringify({
+          products: merged, page: nextPage, hasMore: nextPage < totalPages, filters: filtersRef.current,
+        }));
+        return merged;
+      });
+      pageRef.current = nextPage;
+      const more = nextPage < totalPages;
+      setHasMore(more);
+      hasMoreRef.current = more;
+    } catch { /* ignore */ }
+    setLoadingMore(false);
+  }, [loadingMore]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Restore scroll position on back-navigation
+  useEffect(() => {
+    const saved = sessionStorage.getItem(SCROLL_KEY);
+    if (saved) {
+      try {
+        const { products: savedProducts, page: savedPage, hasMore: savedHasMore, filters: savedFilters } = JSON.parse(saved);
+        setProducts(savedProducts);
+        setFilters(savedFilters);
+        pageRef.current = savedPage;
+        hasMoreRef.current = savedHasMore;
+        setHasMore(savedHasMore);
+        setLoading(false);
+        // Restore scroll after render
+        requestAnimationFrame(() => {
+          const scrollY = sessionStorage.getItem(SCROLL_KEY + '_y');
+          if (scrollY) window.scrollTo(0, parseInt(scrollY, 10));
+        });
+        return;
+      } catch { /* fall through to normal load */ }
+    }
+    load(EMPTY_FILTERS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Save scroll position continuously for SPA back-navigation
   useEffect(() => {
-    setPage(1);
-    load({ ...filters, search: debouncedSearch, seller: debouncedSeller }, 1);
+    const saveScroll = () => sessionStorage.setItem(SCROLL_KEY + '_y', String(window.scrollY));
+    window.addEventListener('scroll', saveScroll, { passive: true });
+    return () => window.removeEventListener('scroll', saveScroll);
+  }, []);
+
+  // IntersectionObserver for infinite scroll
+  useEffect(() => {
+    if (observerRef.current) observerRef.current.disconnect();
+    observerRef.current = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting) loadMore(); },
+      { rootMargin: '200px' }
+    );
+    if (sentinelRef.current) observerRef.current.observe(sentinelRef.current);
+    return () => observerRef.current?.disconnect();
+  }, [loadMore]);
+
+  // Re-observe sentinel when hasMore changes
+  useEffect(() => {
+    if (!hasMore && observerRef.current) observerRef.current.disconnect();
+    else if (hasMore && sentinelRef.current && observerRef.current) {
+      observerRef.current.observe(sentinelRef.current);
+    }
+  }, [hasMore]);
+
+  // Filter changes → reset and reload
+  useEffect(() => {
+    sessionStorage.removeItem(SCROLL_KEY);
+    sessionStorage.removeItem(SCROLL_KEY + '_y');
+    const f = { ...filters, search: debouncedSearch, seller: debouncedSeller };
+    load(f);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     debouncedSearch,
@@ -423,6 +522,11 @@ export default function Marketplace() {
       setRecommendations([]);
     }
   }, [user]);
+
+  // Load recently viewed products
+  useEffect(() => {
+    setRecentlyViewed(getRecentlyViewed());
+  }, []);
 
   async function handleBuyBundle(bundleId) {
     if (!user) return navigate("/auth");
@@ -457,7 +561,9 @@ export default function Marketplace() {
 
   function reset() {
     setFilters(EMPTY_FILTERS);
-    setPage(1);
+    sessionStorage.removeItem(SCROLL_KEY);
+    sessionStorage.removeItem(SCROLL_KEY + '_y');
+    load(EMPTY_FILTERS);
   }
 
   function useNearMe() {
@@ -472,18 +578,12 @@ export default function Marketplace() {
           radius: filters.radius || 50,
         };
         setFilters(newFilters);
-        setPage(1);
-        load(newFilters, 1);
+        sessionStorage.removeItem(SCROLL_KEY);
+        load(newFilters);
         setGeoLoading(false);
       },
       () => setGeoLoading(false),
     );
-  }
-
-  function handlePageChange(newPage) {
-    setPage(newPage);
-    load(filters, newPage);
-    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   return (
@@ -594,10 +694,7 @@ export default function Marketplace() {
             </div>
             <button
               style={{ ...s.resetBtn, fontSize: 12 }}
-              onClick={() => {
-                const { clearProducts } = useCompare();
-                clearProducts();
-              }}
+              onClick={clearProducts}
             >
               Clear
             </button>
@@ -797,13 +894,30 @@ export default function Marketplace() {
       </div>
 
       {loading ? (
-        <Spinner />
+        <div style={s.grid}>
+          {Array.from({ length: PAGE_SIZE }).map((_, i) => (
+            <SkeletonProductCard key={i} />
+          ))}
+        </div>
       ) : viewMode === "map" ? (
         <Suspense fallback={<Spinner />}>
-          <MapView products={products} />
+          <MapView
+            products={products}
+            onFarmerClick={(name) => {
+              if (name) {
+                setFilters(f => ({ ...f, seller: name }));
+              }
+              setViewMode("grid");
+            }}
+          />
         </Suspense>
       ) : products.length === 0 ? (
-        <div style={s.empty}>{t("marketplace.noProducts")}</div>
+        <div style={s.empty} role="status">
+          <div>{t("marketplace.noProducts")}</div>
+          <button style={{ ...s.resetBtn, marginTop: 16 }} onClick={reset}>
+            {t("marketplace.clearFilters", "Clear filters")}
+          </button>
+        </div>
       ) : (
         <div style={s.grid}>
           {products.map((p) => (
@@ -1005,13 +1119,19 @@ export default function Marketplace() {
         </div>
       )}
 
-      <Pagination
-        page={page}
-        totalPages={pagination.totalPages}
-        total={pagination.total}
-        limit={PAGE_SIZE}
-        onChange={handlePageChange}
-      />
+      {/* Infinite scroll sentinel */}
+      {!loading && (
+        <>
+          <div ref={sentinelRef} style={{ height: 1 }} aria-hidden="true" />
+          {loadingMore && (
+            <div style={{ ...s.grid, marginTop: 16 }}>
+              {Array.from({ length: 4 }).map((_, i) => (
+                <SkeletonProductCard key={i} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
 
       {compareProducts.length > 0 && (
         <div style={s.compareBar}>
@@ -1048,13 +1168,33 @@ export default function Marketplace() {
                   <div style={s.name}>{b.name}</div>
                   <div style={s.farmer}>by {b.farmer_name}</div>
                   {b.description && <div style={s.desc}>{b.description}</div>}
-                  <ul style={s.bundleItems}>
-                    {b.items?.map((i) => (
-                      <li key={i.product_id}>
-                        {i.quantity} × {i.product_name} ({i.unit})
-                      </li>
-                    ))}
-                  </ul>
+                  <button
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#2d6a4f',
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      fontWeight: 600,
+                      padding: 0,
+                      marginBottom: 8,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}
+                    onClick={() => setExpandedBundles(prev => ({ ...prev, [b.id]: !prev[b.id] }))}
+                  >
+                    {expandedBundles[b.id] ? '▼' : '▶'} Included Items ({b.items?.length || 0})
+                  </button>
+                  {expandedBundles[b.id] && (
+                    <ul style={s.bundleItems}>
+                      {b.items?.map((i) => (
+                        <li key={i.product_id}>
+                          {i.quantity} × {i.product_name} ({i.unit})
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                   <div style={s.price}>{b.price} XLM</div>
                   {usd(b.price) && (
                     <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
@@ -1103,6 +1243,31 @@ export default function Marketplace() {
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {recentlyViewed.length > 0 && (
+        <div>
+          <div style={s.sectionTitle}>Recently Viewed</div>
+          <div style={{ display: 'flex', overflowX: 'auto', gap: 16, paddingBottom: 16 }}>
+            {recentlyViewed.map((p) => (
+              <div
+                key={p.id}
+                onClick={() => navigate(`/product/${p.id}`)}
+                style={{ ...s.card, minWidth: 200, cursor: 'pointer', flexShrink: 0 }}
+              >
+                {p.image_url && (
+                  <img
+                    src={p.image_url}
+                    alt={p.name}
+                    style={{ width: '100%', height: 120, objectFit: 'cover', borderRadius: 8, marginBottom: 12 }}
+                  />
+                )}
+                <div style={s.name}>{p.name}</div>
+                <div style={s.price}>{p.price} XLM</div>
+              </div>
+            ))}
           </div>
         </div>
       )}

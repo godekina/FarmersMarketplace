@@ -2,6 +2,7 @@ const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const db = require('../db/schema');
 const {
@@ -344,6 +345,37 @@ router.post('/refresh', async (req, res) => {
 
 /**
  * @swagger
+ * /api/auth/me:
+ *   get:
+ *     summary: Get current authenticated user profile
+ *     tags: [Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Current user profile
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/User'
+ *       401:
+ *         description: Invalid or missing token
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.get('/me', auth, async (req, res) => {
+  const { rows } = await db.query(
+    'SELECT id, name, email, role, stellar_public_key AS publicKey, referral_code AS referralCode FROM users WHERE id = $1',
+    [req.user.id]
+  );
+  if (!rows[0]) return err(res, 404, 'User not found', 'not_found');
+  res.json(rows[0]);
+});
+
+/**
+ * @swagger
  * /api/auth/logout:
  *   post:
  *     summary: Logout and invalidate refresh token
@@ -367,6 +399,22 @@ router.post('/logout', async (req, res) => {
   }
   res.clearCookie('refreshToken', { path: '/api/auth' });
   res.json({ ok: true });
+});
+
+// POST /api/auth/deactivate — soft-deactivate account (GDPR: PII anonymized after 30 days)
+router.post('/deactivate', auth, async (req, res) => {
+  const { rows } = await db.query('SELECT id FROM users WHERE id = $1', [req.user.id]);
+  if (!rows[0]) return err(res, 404, 'User not found', 'not_found');
+
+  await db.query(
+    'UPDATE users SET active = 0, deactivated_at = CURRENT_TIMESTAMP WHERE id = $1',
+    [req.user.id]
+  );
+
+  // Revoke all sessions
+  await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [req.user.id]);
+  res.clearCookie('refreshToken', { path: '/api/auth' });
+  res.json({ success: true, message: 'Account deactivated. Your data will be anonymized after 30 days.' });
 });
 
 // DELETE /api/auth/account — self-service account deletion
@@ -491,106 +539,119 @@ router.post('/recover', validate.recover, async (req, res) => {
   });
 });
 
-// ── TOTP helpers (no external TOTP lib needed) ──────────────────────────────
-function base32Encode(buf) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  let bits = 0, val = 0, out = '';
-  for (const byte of buf) { val = (val << 8) | byte; bits += 8; while (bits >= 5) { out += alphabet[(val >>> (bits - 5)) & 31]; bits -= 5; } }
-  if (bits > 0) out += alphabet[(val << (5 - bits)) & 31];
-  return out;
-}
-
-function base32Decode(str) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  const s = str.toUpperCase().replace(/=+$/, '');
-  let bits = 0, val = 0;
-  const out = [];
-  for (const c of s) { val = (val << 5) | alphabet.indexOf(c); bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; } }
-  return Buffer.from(out);
-}
-
-function totp(secret) {
-  const counter = Math.floor(Date.now() / 1000 / 30);
-  const key = base32Decode(secret);
-  const buf = Buffer.alloc(8);
-  buf.writeBigInt64BE(BigInt(counter));
-  const hmac = crypto.createHmac('sha1', key).update(buf).digest();
-  const offset = hmac[19] & 0xf;
-  const code = (((hmac[offset] & 0x7f) << 24) | (hmac[offset+1] << 16) | (hmac[offset+2] << 8) | hmac[offset+3]) % 1000000;
-  return String(code).padStart(6, '0');
-}
-
-function verifyTotp(secret, token) {
-  for (const d of [-1, 0, 1]) {
-    const counter = Math.floor(Date.now() / 1000 / 30) + d;
-    const key = base32Decode(secret);
-    const buf = Buffer.alloc(8);
-    buf.writeBigInt64BE(BigInt(counter));
-    const hmac = crypto.createHmac('sha1', key).update(buf).digest();
-    const offset = hmac[19] & 0xf;
-    const code = (((hmac[offset] & 0x7f) << 24) | (hmac[offset+1] << 16) | (hmac[offset+2] << 8) | hmac[offset+3]) % 1000000;
-    if (String(code).padStart(6, '0') === String(token).padStart(6, '0')) return true;
-  }
-  return false;
-}
-
 /**
  * POST /api/auth/2fa/setup
- * Generates a TOTP secret and returns otpauth URL + QR code data URL
+ * Initiate 2FA setup: generate TOTP secret and return QR code
  */
 router.post('/2fa/setup', auth, async (req, res) => {
-  const secret = base32Encode(crypto.randomBytes(20));
-  const { rows } = await db.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
-  const email = rows[0]?.email || 'user';
-  const otpauth = `otpauth://totp/FarmersMarket:${encodeURIComponent(email)}?secret=${secret}&issuer=FarmersMarket`;
-  const qrDataUrl = await QRCode.toDataURL(otpauth);
+  try {
+    const secret = speakeasy.generateSecret({
+      name: `Farmers Marketplace (${req.user.id})`,
+      issuer: 'Farmers Marketplace',
+      length: 32,
+    });
 
-  // Store pending secret (not yet confirmed)
-  await db.query('UPDATE users SET totp_pending = $1 WHERE id = $2', [secret, req.user.id]);
+    const qrCode = await QRCode.toDataURL(secret.otpauth_url);
 
-  res.json({ success: true, otpauth, qrDataUrl, secret });
+    res.json({
+      secret: secret.base32,
+      qrCode,
+      backupCodes: generateBackupCodes(10),
+    });
+  } catch (e) {
+    logger.error('2fa_setup_error', { error: e.message });
+    res.status(500).json({ error: 'Failed to generate 2FA setup' });
+  }
 });
 
 /**
  * POST /api/auth/2fa/verify
- * Confirms setup: verifies token and activates 2FA
+ * Verify TOTP code and enable 2FA
+ * Body: { secret, code, backupCodes }
  */
-router.post('/2fa/verify', auth, async (req, res) => {
-  const { token } = req.body;
-  const { rows } = await db.query('SELECT totp_pending FROM users WHERE id = $1', [req.user.id]);
-  const secret = rows[0]?.totp_pending;
-  if (!secret) return err(res, 400, '2FA setup not initiated', 'no_pending_setup');
-  if (!verifyTotp(secret, token)) return err(res, 401, 'Invalid code', 'invalid_totp');
+router.post('/2fa/verify', auth, validate.verify2FA, async (req, res) => {
+  const { secret, code, backupCodes } = req.body;
 
-  // Generate backup codes
-  const backupCodes = Array.from({ length: 8 }, () => crypto.randomBytes(4).toString('hex'));
-  await db.query(
-    'UPDATE users SET totp_secret = $1, totp_enabled = true, totp_pending = NULL, totp_backup_codes = $2 WHERE id = $3',
-    [secret, JSON.stringify(backupCodes), req.user.id]
-  );
-  res.json({ success: true, backupCodes });
-});
+  try {
+    // Verify the TOTP code
+    const verified = speakeasy.totp.verify({
+      secret,
+      encoding: 'base32',
+      token: code,
+      window: 2,
+    });
 
-/**
- * POST /api/auth/2fa/disable
- * Disables 2FA after confirming current password
- */
-router.post('/2fa/disable', auth, async (req, res) => {
-  const { password } = req.body;
-  if (!password) return err(res, 400, 'Password required', 'missing_password');
-  const { rows } = await db.query('SELECT password FROM users WHERE id = $1', [req.user.id]);
-  const valid = await bcrypt.compare(password, rows[0]?.password || '');
-  if (!valid) return err(res, 401, 'Incorrect password', 'invalid_credentials');
-  await db.query('UPDATE users SET totp_secret = NULL, totp_enabled = false, totp_pending = NULL, totp_backup_codes = NULL WHERE id = $1', [req.user.id]);
-  res.json({ success: true });
+    if (!verified) {
+      return err(res, 400, 'Invalid verification code', 'invalid_code');
+    }
+
+    // Hash backup codes
+    const hashedBackupCodes = backupCodes.map(code => 
+      crypto.createHash('sha256').update(code).digest('hex')
+    );
+
+    // Store 2FA settings
+    await db.query(
+      `INSERT INTO user_2fa_settings (user_id, totp_secret, backup_codes, enabled, created_at)
+       VALUES ($1, $2, $3, 1, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET
+       totp_secret = $2, backup_codes = $3, enabled = 1, updated_at = NOW()`,
+      [req.user.id, secret, JSON.stringify(hashedBackupCodes)]
+    );
+
+    res.json({ success: true, message: '2FA enabled successfully' });
+  } catch (e) {
+    logger.error('2fa_verify_error', { error: e.message, userId: req.user.id });
+    res.status(500).json({ error: 'Failed to verify 2FA' });
+  }
 });
 
 /**
  * GET /api/auth/2fa/status
+ * Check if 2FA is enabled for the current user
  */
 router.get('/2fa/status', auth, async (req, res) => {
-  const { rows } = await db.query('SELECT totp_enabled FROM users WHERE id = $1', [req.user.id]);
-  res.json({ success: true, enabled: !!rows[0]?.totp_enabled });
+  try {
+    const { rows } = await db.query(
+      'SELECT enabled FROM user_2fa_settings WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    const enabled = rows[0]?.enabled === 1;
+    res.json({ enabled });
+  } catch (e) {
+    logger.error('2fa_status_error', { error: e.message });
+    res.status(500).json({ error: 'Failed to check 2FA status' });
+  }
 });
+
+/**
+ * POST /api/auth/2fa/disable
+ * Disable 2FA for the current user
+ */
+router.post('/2fa/disable', auth, async (req, res) => {
+  try {
+    await db.query(
+      'UPDATE user_2fa_settings SET enabled = 0, updated_at = NOW() WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    res.json({ success: true, message: '2FA disabled successfully' });
+  } catch (e) {
+    logger.error('2fa_disable_error', { error: e.message });
+    res.status(500).json({ error: 'Failed to disable 2FA' });
+  }
+});
+
+/**
+ * Helper: Generate backup codes
+ */
+function generateBackupCodes(count) {
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    codes.push(crypto.randomBytes(4).toString('hex').toUpperCase());
+  }
+  return codes;
+}
 
 module.exports = router;

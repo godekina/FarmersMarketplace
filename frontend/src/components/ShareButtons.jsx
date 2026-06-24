@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useCallback } from "react";
 
 const s = {
   wrap: { marginTop: 16 },
@@ -14,14 +14,45 @@ const s = {
     fontSize: 13,
     fontWeight: 600,
   },
+  toast: {
+    position: "fixed",
+    bottom: 24,
+    left: "50%",
+    transform: "translateX(-50%)",
+    padding: "10px 20px",
+    borderRadius: 8,
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: 600,
+    zIndex: 9999,
+    transition: "opacity 0.3s ease",
+  },
+  toastSuccess: { background: "#16a34a" },
+  toastError: { background: "#dc2626" },
 };
 
 export default function ShareButtons({ title, url, onShare }) {
+  const [toast, setToast] = useState(null);
   const encodedUrl = encodeURIComponent(url);
   const encodedText = encodeURIComponent(`${title} ${url}`);
+  const canNativeShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
+
+  const showToast = useCallback((message, type) => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 2500);
+  }, []);
 
   function track(platform) {
     if (typeof onShare === "function") onShare(platform);
+  }
+
+  async function shareNative() {
+    try {
+      await navigator.share({ title, url, text: title });
+      track("native_share");
+    } catch (e) {
+      if (e.name !== "AbortError") showToast("Share failed", "error");
+    }
   }
 
   function shareWhatsApp() {
@@ -55,10 +86,23 @@ export default function ShareButtons({ title, url, onShare }) {
 
   async function copyLink() {
     try {
-      await navigator.clipboard.writeText(url);
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(url);
+      } else {
+        // Fallback for older browsers
+        const textarea = document.createElement("textarea");
+        textarea.value = url;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
       track("copy_link");
+      showToast("Copied!", "success");
     } catch {
-      // Clipboard may fail on insecure contexts; ignore gracefully.
+      showToast("Failed to copy link", "error");
     }
   }
 
@@ -66,6 +110,11 @@ export default function ShareButtons({ title, url, onShare }) {
     <div style={s.wrap}>
       <div style={s.title}>Share this product</div>
       <div style={s.row}>
+        {canNativeShare && (
+          <button type="button" style={s.btn} onClick={shareNative}>
+            Share
+          </button>
+        )}
         <button type="button" style={s.btn} onClick={shareWhatsApp}>
           WhatsApp
         </button>
@@ -79,6 +128,16 @@ export default function ShareButtons({ title, url, onShare }) {
           Copy link
         </button>
       </div>
+      {toast && (
+        <div
+          style={{
+            ...s.toast,
+            ...(toast.type === "success" ? s.toastSuccess : s.toastError),
+          }}
+        >
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }

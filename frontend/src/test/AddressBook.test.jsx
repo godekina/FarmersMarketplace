@@ -1,38 +1,76 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-// Minimal unit tests for AddressBook default-address logic
-// (optimistic update and set-default flow)
+vi.mock('../api/client', () => ({
+  api: {
+    getAddresses: vi.fn(),
+    deleteAddress: vi.fn(),
+    createAddress: vi.fn(),
+    updateAddress: vi.fn(),
+    setDefaultAddress: vi.fn(),
+  },
+}));
 
-const buildAddresses = () => [
-  { id: 1, label: 'Home', street: '1 Main St', city: 'Nairobi', country: 'Kenya', postal_code: '', is_default: 1 },
-  { id: 2, label: 'Work', street: '2 Work Ave', city: 'Nairobi', country: 'Kenya', postal_code: '', is_default: 0 },
-];
+vi.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { role: 'buyer' } }),
+}));
 
-// Replicate the optimistic update logic from AddressBook.handleSetDefault
-function optimisticSetDefault(addresses, id) {
-  return addresses.map(a => ({ ...a, is_default: a.id === id ? 1 : 0 }));
-}
+import { api } from '../api/client';
+import AddressBook from '../pages/AddressBook';
 
-describe('AddressBook default address logic', () => {
-  it('only one address is default after optimistic update', () => {
-    const addresses = buildAddresses();
-    const updated = optimisticSetDefault(addresses, 2);
-    const defaults = updated.filter(a => a.is_default);
-    expect(defaults).toHaveLength(1);
-    expect(defaults[0].id).toBe(2);
+const mockAddress = {
+  id: 1,
+  label: 'Home',
+  street: '123 Main St',
+  city: 'Nairobi',
+  country: 'Kenya',
+  postal_code: '00100',
+  is_default: false,
+};
+
+describe('AddressBook delete confirmation (#430)', () => {
+  beforeEach(() => {
+    api.getAddresses.mockResolvedValue({ data: [mockAddress] });
+    api.deleteAddress.mockReset();
+    api.deleteAddress.mockResolvedValue({});
   });
 
-  it('old default loses chip after setting new default', () => {
-    const addresses = buildAddresses();
-    const updated = optimisticSetDefault(addresses, 2);
-    expect(updated.find(a => a.id === 1).is_default).toBe(0);
-    expect(updated.find(a => a.id === 2).is_default).toBe(1);
+  it('shows confirmation dialog when delete is clicked', async () => {
+    render(<AddressBook />);
+    const deleteBtn = await screen.findByRole('button', { name: /delete/i });
+    fireEvent.click(deleteBtn);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByText(/Are you sure you want to delete this address\? This cannot be undone\./i)).toBeInTheDocument();
   });
 
-  it('setting the already-default address keeps it default', () => {
-    const addresses = buildAddresses();
-    const updated = optimisticSetDefault(addresses, 1);
-    expect(updated.find(a => a.id === 1).is_default).toBe(1);
-    expect(updated.find(a => a.id === 2).is_default).toBe(0);
+  it('does not call deleteAddress when Cancel is clicked', async () => {
+    render(<AddressBook />);
+    const deleteBtn = await screen.findByRole('button', { name: /delete/i });
+    fireEvent.click(deleteBtn);
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    expect(api.deleteAddress).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('calls deleteAddress only after confirming', async () => {
+    render(<AddressBook />);
+    const deleteBtn = await screen.findByRole('button', { name: /delete/i });
+    fireEvent.click(deleteBtn);
+    // Click the Delete button inside the dialog
+    const dialog = screen.getByRole('dialog');
+    const confirmBtn = dialog.querySelector('button:last-child');
+    fireEvent.click(confirmBtn);
+    await waitFor(() => expect(api.deleteAddress).toHaveBeenCalledWith(1));
+  });
+
+  it('dismisses dialog on Escape key', async () => {
+    render(<AddressBook />);
+    const deleteBtn = await screen.findByRole('button', { name: /delete/i });
+    fireEvent.click(deleteBtn);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(api.deleteAddress).not.toHaveBeenCalled();
   });
 });

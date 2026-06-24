@@ -147,3 +147,4 @@ router.post('/validate', auth, async (req, res) => {
 module.exports = router;
 module.exports.resolveCoupon = resolveCoupon;
 module.exports.calcDiscount = calcDiscount;
+module.exports.getTierPrice = getTierPrice;

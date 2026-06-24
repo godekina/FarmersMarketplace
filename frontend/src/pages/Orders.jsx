@@ -1,10 +1,11 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Helmet } from 'react-helmet-async';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import Spinner from '../components/Spinner';
 
-const ALL_STATUSES = ['pending', 'paid', 'processing', 'shipped', 'delivered', 'failed'];
+const ALL_STATUSES = ['pending', 'paid', 'processing', 'shipped', 'delivered', 'disputed', 'cancelled', 'refunded', 'failed'];
 const FILTER_TABS = ['all', ...ALL_STATUSES];
 
 const STATUS_STYLE = {
@@ -14,10 +15,14 @@ const STATUS_STYLE = {
   shipped:    { bg: '#d1ecf1', color: '#0c5460' },
   delivered:  { bg: '#d4edda', color: '#155724' },
   failed:     { bg: '#fee',    color: '#c0392b' },
+  disputed:   { bg: '#ffe4cc', color: '#a04000' },
+  cancelled:  { bg: '#f0f0f0', color: '#555' },
+  refunded:   { bg: '#e8d5f5', color: '#6a0dad' },
 };
 
 const STATUS_ICON = {
   pending: '⏳', paid: '✅', processing: '⚙️', shipped: '🚚', delivered: '📦', failed: '❌',
+  disputed: '⚠️', cancelled: '🚫', refunded: '↩️',
 };
 
 // Timeline steps shown in order detail
@@ -48,6 +53,11 @@ const s = {
   step:      { display: 'flex', flexDirection: 'column', alignItems: 'center', fontSize: 10, color: '#bbb', minWidth: 60 },
   stepDot:   { width: 10, height: 10, borderRadius: '50%', background: '#ddd', marginBottom: 3 },
   stepLine:  { flex: 1, height: 2, background: '#eee', minWidth: 20 },
+  filters:   { display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' },
+  filterLabel: { fontSize: 13, color: '#555', whiteSpace: 'nowrap' },
+  dateInput: { padding: '6px 10px', border: '1px solid #ddd', borderRadius: 8, fontSize: 13, color: '#333' },
+  sortSelect: { padding: '6px 10px', border: '1px solid #ddd', borderRadius: 8, fontSize: 13, color: '#333', background: '#fff', cursor: 'pointer' },
+  clearBtn:  { fontSize: 12, padding: '5px 12px', borderRadius: 8, border: '1px solid #ddd', cursor: 'pointer', background: '#f5f5f5', color: '#555', fontWeight: 600 },
 };
 
 function StatusTimeline({ status }) {
@@ -77,18 +87,49 @@ function StatusTimeline({ status }) {
 
 export default function Orders() {
   const [allOrders, setAllOrders] = useState([]);
-  const [activeTab, setActiveTab]  = useState('all');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = FILTER_TABS.includes(searchParams.get('status')) ? searchParams.get('status') : 'all';
+  const dateFrom = searchParams.get('date_from') || '';
+  const dateTo = searchParams.get('date_to') || '';
+  const sortBy = searchParams.get('sort') || 'newest';
+
+  const setActiveTab = (tab) => {
+    const p = {};
+    if (tab !== 'all') p.status = tab;
+    if (dateFrom) p.date_from = dateFrom;
+    if (dateTo) p.date_to = dateTo;
+    if (sortBy !== 'newest') p.sort = sortBy;
+    setSearchParams(p, { replace: true });
+  };
+
+  function setFilterParam(key, value) {
+    const p = {};
+    if (activeTab !== 'all') p.status = activeTab;
+    if (dateFrom) p.date_from = dateFrom;
+    if (dateTo) p.date_to = dateTo;
+    if (sortBy !== 'newest') p.sort = sortBy;
+    if (value) p[key] = value;
+    else delete p[key];
+    setSearchParams(p, { replace: true });
+  }
   const [loading, setLoading]      = useState(true);
   const [error, setError]          = useState(null);
   const [hovered, setHovered]      = useState(null);
   const { user } = useAuth();
   const [claimingId, setClaimingId] = useState(null);
   const [claimError, setClaimError] = useState({});
+  const [downloadingReceipt, setDownloadingReceipt] = useState(null);
   const [bundleOrders, setBundleOrders] = useState([]);
   const [returnModal, setReturnModal] = useState(null); // orderId
   const [returnReason, setReturnReason] = useState('');
   const [returnLoading, setReturnLoading] = useState(false);
   const [returnMsg, setReturnMsg] = useState({});
+  const [sseError, setSseError] = useState(false);
+  const esRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const retriedRef = useRef(false);
+  const [exporting, setExporting] = useState(null);
+  const [exportError, setExportError] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -109,6 +150,36 @@ export default function Orders() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // SSE: real-time order status updates
+  useEffect(() => {
+    function connect() {
+      const url = api.getOrdersStreamUrl();
+      const es = new EventSource(url);
+      esRef.current = es;
+      es.onmessage = (e) => {
+        try {
+          const { id, status } = JSON.parse(e.data);
+          setAllOrders(prev => prev.map(o => o.id === id ? { ...o, status } : o));
+        } catch { /* ignore malformed */ }
+      };
+      es.onerror = () => {
+        es.close();
+        esRef.current = null;
+        if (!retriedRef.current) {
+          retriedRef.current = true;
+          reconnectTimerRef.current = setTimeout(connect, 5000);
+        } else {
+          setSseError(true);
+        }
+      };
+    }
+    connect();
+    return () => {
+      if (esRef.current) { esRef.current.close(); esRef.current = null; }
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); }
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleClaim(orderId) {
     setClaimingId(orderId);
@@ -139,6 +210,18 @@ export default function Orders() {
     }
   }
 
+  async function handleExport(format) {
+    setExporting(format);
+    setExportError(null);
+    try {
+      await api.exportOrders(format);
+    } catch (e) {
+      setExportError(e.message || 'Export failed');
+    } finally {
+      setExporting(null);
+    }
+  }
+
   const stats = {
     total:   allOrders.length,
     paid:    allOrders.filter(o => o.status === 'paid').length,
@@ -147,7 +230,24 @@ export default function Orders() {
     spent:   allOrders.filter(o => o.status === 'paid').reduce((sum, o) => sum + parseFloat(o.total_price || 0), 0),
   };
 
-  const visible = activeTab === 'all' ? allOrders : allOrders.filter(o => o.status === activeTab);
+  let visible = activeTab === 'all' ? allOrders : allOrders.filter(o => o.status === activeTab);
+  if (dateFrom) {
+    const from = new Date(dateFrom);
+    visible = visible.filter(o => new Date(o.created_at) >= from);
+  }
+  if (dateTo) {
+    const to = new Date(dateTo + 'T23:59:59');
+    visible = visible.filter(o => new Date(o.created_at) <= to);
+  }
+  if (sortBy === 'oldest') {
+    visible = [...visible].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  } else if (sortBy === 'total_asc') {
+    visible = [...visible].sort((a, b) => parseFloat(a.total_price) - parseFloat(b.total_price));
+  } else if (sortBy === 'total_desc') {
+    visible = [...visible].sort((a, b) => parseFloat(b.total_price) - parseFloat(a.total_price));
+  } else {
+    visible = [...visible].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  }
 
   return (
     <div style={s.page}>
@@ -157,6 +257,48 @@ export default function Orders() {
       </Helmet>
       <div style={s.title}>📦 My Orders</div>
       <div style={s.sub}>Track your purchases and verify transactions</div>
+
+      {exportError && (
+        <div style={{ background: '#fee', color: '#c0392b', border: '1px solid #f5a5a5', borderRadius: 8, padding: 16, marginBottom: 20 }}>
+          ⚠️ {exportError}
+        </div>
+      )}
+
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: 'inline-block', position: 'relative' }}>
+          <button
+            style={{ background: '#2d6a4f', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: exporting ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 600, opacity: exporting ? 0.7 : 1 }}
+            disabled={exporting}
+            onClick={(e) => {
+              const menu = e.currentTarget.nextElementSibling;
+              menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
+            }}
+          >
+            {exporting ? `⏳ Exporting as ${exporting.toUpperCase()}...` : '📥 Export'}
+          </button>
+          <div
+            style={{
+              position: 'absolute', top: '100%', left: 0, marginTop: 4, background: '#fff', border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.1)', zIndex: 10, display: 'none', minWidth: 140
+            }}
+            onClick={(e) => e.currentTarget.style.display = 'none'}
+          >
+            <button
+              style={{ width: '100%', padding: '10px 16px', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', fontSize: 13, color: '#333', borderBottom: '1px solid #eee' }}
+              onClick={() => handleExport('csv')}
+              disabled={exporting}
+            >
+              📄 Export as CSV
+            </button>
+            <button
+              style={{ width: '100%', padding: '10px 16px', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', fontSize: 13, color: '#333' }}
+              onClick={() => handleExport('pdf')}
+              disabled={exporting}
+            >
+              📋 Export as PDF
+            </button>
+          </div>
+        </div>
+      </div>
 
       {error && (
         <div style={{ background: '#fee', color: '#c0392b', border: '1px solid #f5a5a5', borderRadius: 8, padding: 16, marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -170,6 +312,12 @@ export default function Orders() {
         </div>
       )}
 
+      {sseError && (
+        <div style={{ background: '#fff8e1', color: '#856404', border: '1px solid #f9a825', borderRadius: 8, padding: '10px 16px', marginBottom: 16, fontSize: 13 }}>
+          ⚡ Live updates unavailable — refresh to see latest status.
+        </div>
+      )}
+
       {loading && !error ? (
         <Spinner message="Loading orders..." />
       ) : (
@@ -180,6 +328,49 @@ export default function Orders() {
             <div style={s.statCard}><div style={{ ...s.statNum, color: '#856404' }}>{stats.pending}</div><div style={s.statLabel}>Pending</div></div>
             <div style={s.statCard}><div style={{ ...s.statNum, color: '#c0392b' }}>{stats.failed}</div><div style={s.statLabel}>Failed</div></div>
             <div style={s.statCard}><div style={s.statNum}>{stats.spent.toFixed(2)}</div><div style={s.statLabel}>XLM Spent</div></div>
+          </div>
+
+          <div style={s.filters}>
+            <span style={s.filterLabel}>From:</span>
+            <input
+              type="date"
+              style={s.dateInput}
+              value={dateFrom}
+              max={dateTo || undefined}
+              onChange={e => setFilterParam('date_from', e.target.value)}
+            />
+            <span style={s.filterLabel}>To:</span>
+            <input
+              type="date"
+              style={s.dateInput}
+              value={dateTo}
+              min={dateFrom || undefined}
+              onChange={e => setFilterParam('date_to', e.target.value)}
+            />
+            <span style={s.filterLabel}>Sort:</span>
+            <select
+              style={s.sortSelect}
+              value={sortBy}
+              onChange={e => setFilterParam('sort', e.target.value === 'newest' ? '' : e.target.value)}
+            >
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="total_desc">Total ↓</option>
+              <option value="total_asc">Total ↑</option>
+            </select>
+            {(dateFrom || dateTo) && (
+              <button
+                style={s.clearBtn}
+                onClick={() => {
+                  const p = {};
+                  if (activeTab !== 'all') p.status = activeTab;
+                  if (sortBy !== 'newest') p.sort = sortBy;
+                  setSearchParams(p, { replace: true });
+                }}
+              >
+                Clear dates
+              </button>
+            )}
           </div>
 
           <div style={s.tabs}>
@@ -311,6 +502,19 @@ export default function Orders() {
                     {STATUS_ICON[o.status]} {o.status}
                   </span>
                   <span style={s.price}>{parseFloat(o.total_price).toFixed(2)} XLM</span>
+                  {o.status === 'paid' && (
+                    <button
+                      style={{ fontSize: 12, padding: '5px 12px', borderRadius: 8, border: '1px solid #2d6a4f', cursor: downloadingReceipt === o.id ? 'not-allowed' : 'pointer', background: '#fff', color: '#2d6a4f', fontWeight: 600 }}
+                      disabled={downloadingReceipt === o.id}
+                      onClick={async () => {
+                        setDownloadingReceipt(o.id);
+                        try { await api.downloadReceipt(o.id); } catch {}
+                        finally { setDownloadingReceipt(null); }
+                      }}
+                    >
+                      {downloadingReceipt === o.id ? '⏳' : '🧾'} Download Receipt
+                    </button>
+                  )}
                 </div>
               </div>
             );

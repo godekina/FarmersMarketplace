@@ -27,7 +27,7 @@ export default function Compare() {
     <div style={s.page}>
       <div style={s.header}>Compare Products</div>
       <div style={s.description}>
-        Compare selected marketplace products side by side. Select up to three products on the marketplace to view them here.
+        Compare selected marketplace products side by side. Select up to four products on the marketplace to view them here.
       </div>
 
       {!hasEnoughProducts ? (
@@ -54,32 +54,32 @@ export default function Compare() {
               <tr>
                 <td style={{ ...s.td, ...s.rowLabel }}>Farmer</td>
                 {products.map(product => (
-                  <td key={`${product.id}-farmer`} style={s.td}>{product.farmer_name || 'Unknown'}</td>
+                  <td key={`${product.id}-farmer`} style={s.td}>{product?.farmer_name ?? '—'}</td>
                 ))}
               </tr>
               <tr>
                 <td style={{ ...s.td, ...s.rowLabel }}>Price</td>
                 {products.map(product => (
-                  <td key={`${product.id}-price`} style={s.td}>{product.price} XLM</td>
+                  <td key={`${product.id}-price`} style={s.td}>{product?.price != null ? `${product.price} XLM` : '—'}</td>
                 ))}
               </tr>
               <tr>
                 <td style={{ ...s.td, ...s.rowLabel }}>Quantity</td>
                 {products.map(product => (
-                  <td key={`${product.id}-quantity`} style={s.td}>{product.quantity} {product.unit}</td>
+                  <td key={`${product.id}-quantity`} style={s.td}>{product?.quantity != null ? `${product.quantity} ${product?.unit ?? ''}`.trim() : '—'}</td>
                 ))}
               </tr>
               <tr>
                 <td style={{ ...s.td, ...s.rowLabel }}>Unit</td>
                 {products.map(product => (
-                  <td key={`${product.id}-unit`} style={s.td}>{product.unit || 'each'}</td>
+                  <td key={`${product.id}-unit`} style={s.td}>{product?.unit ?? '—'}</td>
                 ))}
               </tr>
               <tr>
                 <td style={{ ...s.td, ...s.rowLabel }}>Rating</td>
                 {products.map(product => (
                   <td key={`${product.id}-rating`} style={s.td}>
-                    {product.review_count > 0 ? (
+                    {(product?.review_count ?? 0) > 0 ? (
                       <StarRating value={product.avg_rating} count={product.review_count} size={14} />
                     ) : 'No reviews'}
                   </td>
@@ -88,8 +88,42 @@ export default function Compare() {
               <tr>
                 <td style={{ ...s.td, ...s.rowLabel }}>Category</td>
                 {products.map(product => (
-                  <td key={`${product.id}-category`} style={s.td}>{product.category || 'Other'}</td>
+                  <td key={`${product.id}-category`} style={s.td}>{product?.category ?? '—'}</td>
                 ))}
+              </tr>
+              <tr>
+                <td style={{ ...s.td, ...s.rowLabel }}>Weight</td>
+                {products.map(product => {
+                  let weight = '—';
+                  if (product?.pricing_type === 'weight' && product.min_weight != null && product.max_weight != null) {
+                    weight = `${product.min_weight}–${product.max_weight} ${product.unit ?? ''}`.trim();
+                  } else if (product?.unit) {
+                    weight = product.unit;
+                  }
+                  return <td key={`${product.id}-weight`} style={s.td}>{weight}</td>;
+                })}
+              </tr>
+              <tr>
+                <td style={{ ...s.td, ...s.rowLabel }}>Allergens</td>
+                {products.map(product => {
+                  let allergens = [];
+                  try { allergens = product?.allergens ? JSON.parse(product.allergens) : []; } catch {}
+                  return (
+                    <td key={`${product.id}-allergens`} style={s.td}>
+                      {allergens.length === 0 ? 'None' : allergens.map(a => a.charAt(0).toUpperCase() + a.slice(1)).join(', ')}
+                    </td>
+                  );
+                })}
+              </tr>
+              <tr>
+                <td style={{ ...s.td, ...s.rowLabel }}>Freshness</td>
+                {products.map(product => {
+                  const bestBefore = product?.best_before;
+                  if (!bestBefore) return <td key={`${product.id}-freshness`} style={s.td}>—</td>;
+                  const diffDays = Math.ceil((new Date(bestBefore) - new Date()) / (1000 * 60 * 60 * 24));
+                  const label = diffDays < 0 ? 'Expired' : diffDays === 0 ? 'Expires today' : `${diffDays}d left`;
+                  return <td key={`${product.id}-freshness`} style={s.td}>{new Date(bestBefore).toLocaleDateString()} ({label})</td>;
+                })}
               </tr>
             </tbody>
           </table>

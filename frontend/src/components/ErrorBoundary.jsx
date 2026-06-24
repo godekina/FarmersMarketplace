@@ -1,4 +1,5 @@
 import React from 'react';
+import { captureException } from '../utils/sentry';
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -32,13 +33,18 @@ class ErrorBoundary extends React.Component {
       },
     });
 
+    // Report to Sentry if configured
+    captureException(error);
+
     // Optionally log to backend
     this.logErrorToBackend(error, errorInfo);
   }
 
   logErrorToBackend = (error, errorInfo) => {
+    const url = import.meta.env.VITE_ERROR_REPORTING_URL;
+    if (!url) return;
     try {
-      fetch('/api/errors', {
+      fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

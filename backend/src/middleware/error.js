@@ -111,7 +111,6 @@ function notFoundHandler(req, res) {
     error: 'not_found',
     message: `Route not found: ${req.method} ${req.path}`,
   });
-  return err(res, 500, 'Internal server error', 'internal_error');
 }
 
 module.exports = { err, asyncHandler, errorHandler, notFoundHandler };

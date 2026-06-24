@@ -108,6 +108,16 @@ async function sendReturnEmail({ type, order, buyer, farmer, reason, txHash, rej
   }
 }
 
+async function sendProductExpiredEmail({ product, farmer }) {
+  if (!SMTP_CONFIGURED) return;
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to: farmer.email,
+    subject: `🚫 Product Deactivated – ${product.name}`,
+    text: `Hi ${farmer.name},\n\nYour product "${product.name}" has been automatically deactivated because its best-before date (${product.best_before}) has passed.\n\nIf you have fresh stock, please create a new listing.\n\nFarmers Marketplace`,
+  });
+}
+
 async function sendContractAlert({ to, alert }) {
   if (!SMTP_CONFIGURED) return;
   const typeLabel = alert.alert_type === 'failed_invocations' ? '⚠️ Failed Invocations' : '🚨 Large Transfer';
@@ -124,6 +134,8 @@ module.exports = {
   sendOrderEmails,
   sendLowStockAlert,
   sendStatusUpdateEmail,
+  sendFreshnessAlert,
+  sendProductExpiredEmail,
   sendBackInStockEmail: async () => {
     if (!SMTP_CONFIGURED) return;
     // Placeholder for back in stock email

@@ -1,4 +1,4 @@
-const BASE = '/api';
+const BASE = '/api/v1';
 
 let accessToken = null;
 let loadingCallback = null;
@@ -81,12 +81,16 @@ async function request(path, options = {}, retry = true) {
     });
 
     if (res.status === 401 && retry) {
-      const token = await refreshAccessToken();
+      let token;
+      try {
+        token = await refreshAccessToken();
+      } catch {
+        token = null;
+      }
       if (token) return request(path, options, false);
       clearAccessToken();
       if (logoutCallback) logoutCallback();
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.message || data.error || 'Session expired');
+      throw new Error('Session expired');
     }
 
     const data = await res.json().catch(() => ({}));
@@ -113,6 +117,7 @@ export const api = {
   login: (body) => request('/auth/login', { method: 'POST', body }),
   logout: () => request('/auth/logout', { method: 'POST' }),
   refresh: () => refreshAccessToken(),
+  getCurrentUser: () => request('/auth/me'),
 
   getProducts: (filters = {}) => request(`/products${toQs(filters)}`),
   getCategories: () => request('/products/categories'),
@@ -184,6 +189,32 @@ export const api = {
   claimEscrow: (orderId) => request(`/orders/${orderId}/claim`, { method: 'POST' }),
   claimPreorder: (orderId) => request(`/orders/${orderId}/claim-preorder`, { method: 'POST' }),
   fileReturn: (orderId, reason) => request(`/orders/${orderId}/return`, { method: 'POST', body: { reason } }),
+  downloadReceipt: async (orderId) => {
+    const headers = {};
+    if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+    const res = await fetch(`${BASE}/orders/${orderId}/receipt`, { credentials: 'include', headers });
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.message || 'Download failed'); }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `receipt-${orderId}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+  exportOrders: async (format) => {
+    const headers = {};
+    if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+    const res = await fetch(`${BASE}/export/orders?format=${format}`, { credentials: 'include', headers });
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.message || 'Export failed'); }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `orders-export.${format === 'pdf' ? 'pdf' : 'csv'}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
   approveReturn: (orderId) => request(`/orders/${orderId}/return/approve`, { method: 'PATCH' }),
   rejectReturn: (orderId, reject_reason) => request(`/orders/${orderId}/return/reject`, { method: 'PATCH', body: { reject_reason } }),
 
@@ -199,6 +230,7 @@ export const api = {
   getPathEstimate: (params) => request(`/wallet/path-estimate${toQs(params)}`),
   deleteAccount: (force) => request(`/auth/account${force ? '?force=true' : ''}`, { method: 'DELETE' }),
   getWalletStreamUrl: () => `/api/wallet/stream?token=${encodeURIComponent(accessToken || '')}`,
+  getOrdersStreamUrl: () => `/api/orders/stream?token=${encodeURIComponent(accessToken || '')}`,
 
   getFarmer: (id) => request(`/farmers/${id}`),
   updateFarmerProfile: (body) => request('/farmers/me', { method: 'PATCH', body }),
@@ -212,7 +244,12 @@ export const api = {
   removeStockAlert: (productId) => request(`/products/${productId}/alert`, { method: 'DELETE' }),
   getMyAlert: (productId) => request(`/products/${productId}/alert/status`),
 
+  joinWaitlist: (productId, body) => request(`/products/${productId}/waitlist`, { method: 'POST', body }),
+  leaveWaitlist: (productId) => request(`/products/${productId}/waitlist`, { method: 'DELETE' }),
+  getWaitlistStatus: (productId) => request(`/products/${productId}/waitlist/status`),
+
   getXlmRate: () => request('/rates/xlm-usd'),
+  getMarketRate: () => request('/market/xlm-usdc'),
   bulkUpdatePrices: (updates, adjustment_percent) =>
     request('/products/bulk-price', { method: 'PATCH', body: { updates, adjustment_percent } }),
 
@@ -226,10 +263,19 @@ export const api = {
   deleteAddress: (id) => request(`/addresses/${id}`, { method: 'DELETE' }),
   setDefaultAddress: (id) => request(`/addresses/${id}/default`, { method: 'PATCH' }),
 
-  adminGetUsers: (page = 1) => request(`/admin/users?page=${page}`),
+  adminGetUsers: (page = 1, filters = {}) => {
+    const qs = new URLSearchParams({ page });
+    if (filters.search) qs.append('search', filters.search);
+    if (filters.role) qs.append('role', filters.role);
+    return request(`/admin/users?${qs}`);
+  },
   adminGetOrders: (page = 1) => request(`/admin/orders?page=${page}`),
   adminDeactivateUser: (id) => request(`/admin/users/${id}`, { method: 'DELETE' }),
+  adminBanUser: (id, reason) => request(`/admin/users/${id}/ban`, { method: 'POST', body: { reason } }),
+  adminUnbanUser: (id) => request(`/admin/users/${id}/ban`, { method: 'DELETE' }),
   adminGetStats: () => request('/admin/stats'),
+  adminGetDisputes: () => request('/disputes'),
+  adminResolveDispute: (id, body) => request(`/disputes/${id}`, { method: 'PATCH', body }),
   adminGetContracts: (qs = '') => request(`/admin/contracts${qs}`),
   adminRegisterContract: (body) => request('/admin/contracts', { method: 'POST', body }),
   adminDeployContract: (formData) => request('/admin/contracts/deploy', { method: 'POST', body: formData }),
@@ -362,6 +408,9 @@ export const api = {
   initiateCoopTx: (id, body) => request(`/cooperatives/${id}/transactions`, { method: 'POST', body }),
   signPendingTx: (txId) => request(`/cooperatives/transactions/${txId}/sign`, { method: 'POST' }),
   getPendingTxs: (coopId) => request(`/cooperatives/${coopId}/pending`),
+  // Coupons
+  validateCoupon: (body) => request('/coupons/validate', { method: 'POST', body }),
+
   // Platform fee
   getFeePreview: (amount) => request(`/orders/fee-preview?amount=${amount}`),
   // Account alerts
@@ -374,9 +423,10 @@ export const api = {
   adminCreateAnnouncement: (body) => request('/announcements/admin', { method: 'POST', body }),
   adminUpdateAnnouncement: (id, body) => request(`/announcements/admin/${id}`, { method: 'PATCH', body }),
   adminDeleteAnnouncement: (id) => request(`/announcements/admin/${id}`, { method: 'DELETE' }),
-  // 2FA
-  get2faStatus: () => request('/auth/2fa/status'),
-  setup2fa: () => request('/auth/2fa/setup', { method: 'POST' }),
-  verify2fa: (token) => request('/auth/2fa/verify', { method: 'POST', body: { token } }),
-  disable2fa: (password) => request('/auth/2fa/disable', { method: 'POST', body: { password } }),
+
+  // Two-Factor Authentication
+  setup2FA: () => request('/auth/2fa/setup', { method: 'POST' }),
+  verify2FA: (body) => request('/auth/2fa/verify', { method: 'POST', body }),
+  get2FAStatus: () => request('/auth/2fa/status'),
+  disable2FA: () => request('/auth/2fa/disable', { method: 'POST' }),
 };

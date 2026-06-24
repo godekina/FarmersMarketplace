@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { api } from '../api/client';
 import { getStellarErrorMessage } from '../utils/stellarErrors';
 import { getErrorMessage } from '../utils/errorMessages';
+import { showToast } from '../utils/toast';
 
 export function usePaymentLink() {
   const [paymentLinkData, setPaymentLinkData] = useState(null);
@@ -26,7 +27,9 @@ export function usePaymentLink() {
         ...linkRes,
       });
     } catch (e) {
-      setPaymentLinkError(getStellarErrorMessage(e) || getErrorMessage(e));
+      const msg = getStellarErrorMessage(e) || getErrorMessage(e);
+      setPaymentLinkError(msg);
+      showToast(msg, 'error');
     } finally {
       setPaymentLinkLoading(false);
     }
