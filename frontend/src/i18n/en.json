@@ -155,7 +155,10 @@
     "previousImage": "Previous image",
     "nextImage": "Next image",
     "thumbnail": "Thumbnail {{n}}",
-    "default": "(Default)"
+    "default": "(Default)",
+    "flashSaleTitle": "Flash Sale",
+    "flashSaleBanner": "Flash sale promotion",
+    "flashSaleSavings": "Save {{pct}}%"
   },
   "wallet": {
     "title": "💳 My Wallet",

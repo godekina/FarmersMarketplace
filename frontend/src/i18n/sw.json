@@ -155,7 +155,10 @@
     "previousImage": "Picha iliyotangulia",
     "nextImage": "Picha inayofuata",
     "thumbnail": "Kijipicha {{n}}",
-    "default": "(Chaguo-msingi)"
+    "default": "(Chaguo-msingi)",
+    "flashSaleTitle": "Ofa ya Haraka",
+    "flashSaleBanner": "Tangazo la ofa ya haraka",
+    "flashSaleSavings": "Okoa {{pct}}%"
   },
   "wallet": {
     "title": "💳 Mkoba Wangu",

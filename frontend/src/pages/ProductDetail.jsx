@@ -884,15 +884,51 @@ export default function ProductDetail() {
         ) : null}
         {isFlashSaleActive ? (
           <>
+            {/* Prominent flash sale banner — amber background meets WCAG AA at 4.5:1 contrast */}
+            <div
+              role="region"
+              aria-label={t('productDetail.flashSaleBanner')}
+              style={{
+                background: '#fbbf24',
+                border: '2px solid #f59e0b',
+                borderRadius: 10,
+                padding: '14px 18px',
+                marginBottom: 16,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 15, fontWeight: 800, color: '#78350f' }}>
+                  ⚡ {t('productDetail.flashSaleTitle')}
+                </span>
+                <span style={{ fontSize: 22, fontWeight: 800, color: '#78350f' }}>
+                  {unitPrice.toFixed(2)} XLM
+                </span>
+                <span style={{ fontSize: 14, textDecoration: 'line-through', color: '#92400e', fontWeight: 500 }}>
+                  {baseUnitPrice.toFixed(2)} XLM
+                </span>
+                <span style={{
+                  background: '#ef4444',
+                  color: '#fff',
+                  borderRadius: 20,
+                  padding: '2px 10px',
+                  fontSize: 13,
+                  fontWeight: 700,
+                }}>
+                  {t('productDetail.flashSaleSavings', {
+                    pct: Math.round((1 - unitPrice / baseUnitPrice) * 100),
+                  })}
+                </span>
+              </div>
+              <FlashSaleCountdown endsAt={product.flash_sale_ends_at} />
+            </div>
+            {/* Price line below banner (no extra countdown — already shown in banner) */}
             <div style={s.price}>
               {unitPrice.toFixed(2)} XLM{' '}
               <span style={{ fontSize: 14, fontWeight: 400 }}>/ {product.unit}</span>
-              <span style={{ marginLeft: 8, fontSize: 13, textDecoration: 'line-through', color: '#888' }}>
-                {baseUnitPrice.toFixed(2)} XLM
-              </span>
             </div>
-            <div style={{ ...s.badge, background: '#fee2e2', color: '#b42318', fontWeight: 700, marginBottom: 8 }}>Flash Sale</div>
-            <FlashSaleCountdown endsAt={product.flash_sale_ends_at} />
           </>
         ) : (
           <div style={s.price}>
