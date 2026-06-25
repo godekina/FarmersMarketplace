@@ -117,15 +117,17 @@ impl EscrowContract {
         let escrow = Escrow {
             buyer,
             farmer,
-            token,
+            // Clone token before moving it into the struct so we can persist it separately.
+            token: token.clone(),
             amount,
             timeout_unix,
             status: EscrowStatus::Active,
         };
         // Persist the token used for this escrow so releases/refunds must use the same token contract.
-        env.storage().persistent().set(&DataKey::Token(order_id), &xlm_token);
+        env.storage().persistent().set(&DataKey::Token(order_id), &token);
         env.storage().persistent().set(&DataKey::Escrow(order_id), &escrow);
         env.storage().persistent().extend_ttl(&DataKey::Escrow(order_id), TTL_MIN, TTL_MAX);
+        env.events().publish(("escrow", "deposit", order_id), amount);
         Ok(())
     }
 
@@ -201,17 +203,17 @@ impl EscrowContract {
             EscrowStatus::Active => {}
         }
 
-        let token_client = token::Client::new(&env, &escrow.token);
+        // Verify the token stored at deposit time matches the escrow record.
         let stored_token: Address = env
             .storage()
             .persistent()
             .get(&DataKey::Token(order_id))
             .ok_or(EscrowError::NotFound)?;
-        if stored_token != xlm_token {
+        if stored_token != escrow.token {
             return Err(EscrowError::InvalidToken);
         }
 
-        let token_client = token::Client::new(&env, &xlm_token);
+        let token_client = token::Client::new(&env, &escrow.token);
 
         let fee_amount = (escrow.amount * platform_fee_bps as i128) / 10_000;
         let farmer_amount = escrow.amount - fee_amount;
@@ -230,6 +232,7 @@ impl EscrowContract {
         escrow.status = EscrowStatus::Released;
         env.storage().persistent().set(&DataKey::Escrow(order_id), &escrow);
         env.storage().persistent().extend_ttl(&DataKey::Escrow(order_id), TTL_MIN, TTL_MAX);
+        env.events().publish(("escrow", "release", order_id), farmer_amount);
         Ok(())
     }
 
@@ -264,30 +267,29 @@ impl EscrowContract {
             return Err(EscrowError::TimeoutNotReached);
         }
 
-        let token_client = token::Client::new(&env, &escrow.token);
+        // Verify the token stored at deposit time matches the escrow record.
         let stored_token: Address = env
             .storage()
             .persistent()
             .get(&DataKey::Token(order_id))
             .ok_or(EscrowError::NotFound)?;
-        if stored_token != xlm_token {
+        if stored_token != escrow.token {
             return Err(EscrowError::InvalidToken);
         }
 
-        let token_client = token::Client::new(&env, &xlm_token);
+        let token_client = token::Client::new(&env, &escrow.token);
         token_client.transfer(&env.current_contract_address(), &escrow.buyer, &escrow.amount);
 
         escrow.status = EscrowStatus::Refunded;
         env.storage().persistent().set(&DataKey::Escrow(order_id), &escrow);
         env.storage().persistent().extend_ttl(&DataKey::Escrow(order_id), TTL_MIN, TTL_MAX);
+        env.events().publish(("escrow", "refund", order_id), escrow.amount);
         Ok(())
     }
 
-    /// Permissionless claim for timeout refunds. Mirrors `refund` but present
-    /// with the explicit name `claim_timeout_refund` used in the spec/docs.
-    pub fn claim_timeout_refund(env: Env, xlm_token: Address, order_id: u64) -> Result<(), EscrowError> {
-        // Reuse refund implementation
-        Self::refund(env, xlm_token, order_id)
+    /// Permissionless claim for timeout refunds. Mirrors `refund`.
+    pub fn claim_timeout_refund(env: Env, order_id: u64) -> Result<(), EscrowError> {
+        Self::refund(env, order_id)
     }
 
     pub fn dispute(env: Env, order_id: u64, caller: Address) -> Result<(), EscrowError> {
@@ -316,8 +318,6 @@ impl EscrowContract {
 
     /// Admin resolves a disputed escrow. Uses the token stored in the record (#683).
     pub fn resolve_dispute(env: Env, order_id: u64, release_to_farmer: bool) {
-        let admin: Address = env
-    pub fn resolve_dispute(env: Env, xlm_token: Address, order_id: u64, release_to_farmer: bool) {
         let admin_transfer: AdminTransfer = env
             .storage()
             .instance()
@@ -335,23 +335,25 @@ impl EscrowContract {
             panic!("escrow is not in dispute");
         }
 
-        let token_client = token::Client::new(&env, &escrow.token);
+        // Verify the token stored at deposit time matches the escrow record.
         let stored_token: Address = env
             .storage()
             .persistent()
             .get(&DataKey::Token(order_id))
             .expect("token not set for escrow");
-        if stored_token != xlm_token {
-            panic!("provided token does not match stored escrow token");
+        if stored_token != escrow.token {
+            panic!("stored token does not match escrow token");
         }
 
-        let token_client = token::Client::new(&env, &xlm_token);
+        let token_client = token::Client::new(&env, &escrow.token);
         if release_to_farmer {
             token_client.transfer(&env.current_contract_address(), &escrow.farmer, &escrow.amount);
             escrow.status = EscrowStatus::Released;
+            env.events().publish(("escrow", "resolve_dispute", order_id), true);
         } else {
             token_client.transfer(&env.current_contract_address(), &escrow.buyer, &escrow.amount);
             escrow.status = EscrowStatus::Refunded;
+            env.events().publish(("escrow", "resolve_dispute", order_id), false);
         }
         env.storage().persistent().set(&DataKey::Escrow(order_id), &escrow);
         env.storage().persistent().extend_ttl(&DataKey::Escrow(order_id), TTL_MIN, TTL_MAX);

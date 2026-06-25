@@ -396,6 +396,7 @@ router.post('/', auth, validate.order, async (req, res) => {
         farmerPublicKey: product.farmer_wallet,
         amount: totalPrice,
         timeoutUnix,
+        userId: req.user.id,
       });
       txHash = result.txHash;
       balanceId = `soroban:${orderId}`;
@@ -688,6 +689,7 @@ router.post('/:id/escrow', auth, async (req, res) => {
       farmerPublicKey: order.farmer_wallet,
       amount: order.total_price,
       timeoutUnix,
+      userId: req.user.id,
     });
     await db.query(
       'UPDATE orders SET status = $1, stellar_tx_hash = $2, escrow_balance_id = $3, escrow_status = $4 WHERE id = $5',
@@ -710,7 +712,7 @@ router.post('/:id/dispute', auth, async (req, res) => {
 
   const { rows: uRows } = await db.query('SELECT stellar_secret_key FROM users WHERE id = $1', [req.user.id]);
   try {
-    const result = await invokeEscrowContract({ action: 'dispute', senderSecret: uRows[0].stellar_secret_key, orderId: Number(order.id) });
+    const result = await invokeEscrowContract({ action: 'dispute', senderSecret: uRows[0].stellar_secret_key, orderId: Number(order.id), userId: req.user.id });
     return res.json({ success: true, txHash: result.txHash });
   } catch (e) {
     return res.status(402).json({ success: false, message: e.message });
@@ -727,7 +729,7 @@ router.post('/:id/refund', auth, async (req, res) => {
 
   const { rows: uRows } = await db.query('SELECT stellar_secret_key FROM users WHERE id = $1', [req.user.id]);
   try {
-    const result = await invokeEscrowContract({ action: 'refund', senderSecret: uRows[0].stellar_secret_key, orderId: Number(order.id) });
+    const result = await invokeEscrowContract({ action: 'refund', senderSecret: uRows[0].stellar_secret_key, orderId: Number(order.id), userId: req.user.id });
     await db.query('UPDATE orders SET escrow_status = $1, stellar_tx_hash = $2 WHERE id = $3', ['refunded', result.txHash, order.id]);
     return res.json({ success: true, txHash: result.txHash });
   } catch (e) {
