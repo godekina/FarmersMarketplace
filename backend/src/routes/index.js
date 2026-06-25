@@ -345,6 +345,7 @@ router.use('/federation', require('./federation'));
 // API Routes - registered for both /api and /api/v1
 registerRoute('/', '/auth', require('./auth'));
 registerRoute('/', '/products', require('./products'));
+registerRoute('/', '/orders', require('./orderBudgetGuard'));
 registerRoute('/', '/orders', require('./orders'));
 registerRoute('/', '/orders/:id/return', require('./returns'));
 registerRoute('/', '/waitlist', require('./waitlist'));
@@ -370,8 +371,7 @@ registerRoute('/', '/batches', require('./batches'));
 registerRoute('/', '/products/flashSales', require('./flashSales'));
 registerRoute('/', '/products/videos', require('./productVideos'));
 registerRoute('/', '/products/:id/calendar', require('./calendar'));
-registerRoute('/', '/orders/budget', require('./orderBudgetGuard'));
-registerRoute('/', '/wallet/budget', require('./walletBudget'));
+registerRoute('/', '/wallet', require('./walletBudget'));
 registerRoute('/', '/products/share', require('./productShare'));
 registerRoute('/', '/products/market', require('./market'));
 registerRoute('/', '/market', require('./market'));
