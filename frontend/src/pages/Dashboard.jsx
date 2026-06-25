@@ -119,6 +119,16 @@ const s = {
   },
   csvInput: { display: 'none' },
   csvResult: { padding: '10px 14px', borderRadius: 8, marginBottom: 12, fontSize: 14 },
+  csvProgressTrack: { width: '100%', height: 8, borderRadius: 4, background: '#e9ecef', overflow: 'hidden', marginBottom: 12 },
+  csvProgressBar: { width: '40%', height: '100%', borderRadius: 4, background: '#2d6a4f', animation: 'csv-indeterminate 1.2s ease-in-out infinite' },
+  csvResultsWrap: { marginTop: 12 },
+  csvResultsScroll: { maxHeight: 320, overflowY: 'auto', border: '1px solid #eee', borderRadius: 8 },
+  csvTable: { width: '100%', borderCollapse: 'collapse', fontSize: 13 },
+  csvTableHeadCell: { textAlign: 'left', padding: '8px 10px', background: '#f8fdf9', position: 'sticky', top: 0, borderBottom: '1px solid #ddd', color: '#333' },
+  csvTableCell: { padding: '8px 10px', borderBottom: '1px solid #f1f1f1' },
+  csvRowOk: { color: '#2d6a4f' },
+  csvRowErr: { color: '#c0392b' },
+  csvDownloadErrBtn: { background: '#c0392b', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 13, marginTop: 10 },
   productThumb: { width: 48, height: 48, objectFit: 'cover', borderRadius: 6, marginRight: 10 },
   galleryPanel: {
     marginTop: 12,
@@ -713,26 +723,70 @@ export default function Dashboard() {
     URL.revokeObjectURL(url);
   }
 
+  // Best-effort client-side parse of the CSV so successful rows can be shown
+  // with the product name they created (the backend only returns a count).
+  async function readCsvRowNames(file) {
+    try {
+      const text = await file.text();
+      const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '');
+      if (lines.length < 2) return {};
+      const headers = lines[0].split(',').map((h) => h.trim());
+      const nameIdx = headers.indexOf('name');
+      if (nameIdx === -1) return {};
+      const map = {};
+      for (let i = 1; i < lines.length; i++) {
+        const rowNum = i + 1; // header is row 1, data starts at row 2
+        const cols = lines[i].split(',');
+        map[rowNum] = (cols[nameIdx] || '').trim();
+      }
+      return map;
+    } catch {
+      return {};
+    }
+  }
+
   async function handleCsvUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
     setCsvUploading(true);
     setCsvResult(null);
     try {
-      const res = await api.uploadProductsCsv(file);
-      const { created, errors } = res.data ?? {};
+      const [rowNames, res] = await Promise.all([readCsvRowNames(file), api.uploadProductsCsv(file)]);
+      const { created, errors } = res ?? {};
+      const errorRows = new Set((errors || []).map((e) => e.row));
+      const successRows = Object.entries(rowNames)
+        .filter(([row]) => !errorRows.has(Number(row)))
+        .map(([row, name]) => ({ row: Number(row), name }));
       setCsvResult({
         type: errors?.length ? 'warn' : 'ok',
         text: `Imported ${created ?? 0} product(s)${errors?.length ? ` with ${errors.length} error(s).` : ' successfully.'}`,
-        details: errors || [],
+        created: created ?? 0,
+        errors: errors || [],
+        successRows,
       });
       if (created > 0) load();
     } catch (err) {
-      setCsvResult({ type: 'err', text: getErrorMessage(err) });
+      setCsvResult({ type: 'err', text: getErrorMessage(err), created: 0, errors: [], successRows: [] });
     } finally {
       setCsvUploading(false);
       e.target.value = '';
     }
+  }
+
+  function downloadCsvErrorReport() {
+    const errors = csvResult?.errors || [];
+    if (!errors.length) return;
+    const headers = ['row', 'message'];
+    const lines = [headers.join(',')];
+    for (const e of errors) {
+      const row = e.row ?? '';
+      const message = (e.error ?? e.message ?? '').replace(/"/g, '""');
+      lines.push(`${row},"${message}"`);
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    Object.assign(document.createElement('a'), { href: url, download: 'bulk-upload-errors.csv' }).click();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -1391,6 +1445,17 @@ export default function Dashboard() {
             onChange={handleCsvUpload}
           />
         </div>
+        {csvUploading && (
+          <div role="progressbar" aria-label={t('dashboard.uploading')} style={s.csvProgressTrack}>
+            <div style={s.csvProgressBar} />
+            <style>{`
+              @keyframes csv-indeterminate {
+                0% { margin-left: -40%; }
+                100% { margin-left: 100%; }
+              }
+            `}</style>
+          </div>
+        )}
         {csvResult && (
           <div
             style={{
@@ -1400,6 +1465,41 @@ export default function Dashboard() {
             }}
           >
             {csvResult.text}
+          </div>
+        )}
+        {csvResult && (csvResult.successRows?.length > 0 || csvResult.errors?.length > 0) && (
+          <div style={s.csvResultsWrap}>
+            <div style={(csvResult.successRows.length + csvResult.errors.length) > 10 ? s.csvResultsScroll : undefined}>
+              <table style={s.csvTable}>
+                <thead>
+                  <tr>
+                    <th style={s.csvTableHeadCell}>{t('dashboard.csvRow')}</th>
+                    <th style={s.csvTableHeadCell}>{t('dashboard.csvStatus')}</th>
+                    <th style={s.csvTableHeadCell}>{t('dashboard.csvDetail')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {csvResult.successRows.map((r) => (
+                    <tr key={`ok-${r.row}`}>
+                      <td style={s.csvTableCell}>{r.row}</td>
+                      <td style={{ ...s.csvTableCell, ...s.csvRowOk }}>{t('dashboard.csvCreated')}</td>
+                      <td style={s.csvTableCell}>{r.name}</td>
+                    </tr>
+                  ))}
+                  {csvResult.errors.map((err, i) => (
+                    <tr key={`err-${i}`}>
+                      <td style={s.csvTableCell}>{err.row}</td>
+                      <td style={{ ...s.csvTableCell, ...s.csvRowErr }}>{t('dashboard.csvError')}</td>
+                      <td style={s.csvTableCell}>{err.error || err.message}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {csvResult.errors.length > 0 && (
+              <button style={s.csvDownloadErrBtn} onClick={downloadCsvErrorReport}>
+                {t('dashboard.downloadErrorReport')}
+              </button>
             {csvResult.details && csvResult.details.length > 0 && (
               <div style={{ marginTop: 8, fontSize: 12 }}>
                 <strong>{t('common.errors')}:</strong>
