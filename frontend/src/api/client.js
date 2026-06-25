@@ -408,6 +408,7 @@ export const api = {
   // Cooperatives & multi-sig
   createCooperative: (body) => request('/cooperatives', { method: 'POST', body }),
   getCooperatives: () => request('/cooperatives'),
+  getFarmerCooperatives: (farmerId) => request(`/cooperatives?farmer_id=${encodeURIComponent(farmerId)}`),
   setupMultisig: (id, body) => request(`/cooperatives/${id}/multisig-setup`, { method: 'POST', body }),
   initiateCoopTx: (id, body) => request(`/cooperatives/${id}/transactions`, { method: 'POST', body }),
   signPendingTx: (txId) => request(`/cooperatives/transactions/${txId}/sign`, { method: 'POST' }),
@@ -427,6 +428,10 @@ export const api = {
   adminCreateAnnouncement: (body) => request('/announcements/admin', { method: 'POST', body }),
   adminUpdateAnnouncement: (id, body) => request(`/announcements/admin/${id}`, { method: 'PATCH', body }),
   adminDeleteAnnouncement: (id) => request(`/announcements/admin/${id}`, { method: 'DELETE' }),
+
+  // Claimable balances
+  getClaimableBalances: () => request('/wallet/claimable-balances'),
+  claimBalance: (balance_id) => request('/wallet/claim', { method: 'POST', body: { balance_id } }),
 
   // Two-Factor Authentication
   setup2FA: () => request('/auth/2fa/setup', { method: 'POST' }),
