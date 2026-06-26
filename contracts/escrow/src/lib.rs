@@ -52,6 +52,9 @@ pub enum EscrowError {
     /// `batch_release` was called with more than `MAX_BATCH_RELEASE` order IDs. (#856)
     /// (Issue suggested code 12, but that is already `NotEnoughSignatures`; 17 is used.)
     BatchTooLarge       = 17,
+    /// No escrow snapshot exists for the requested (order_id, ledger_sequence). (#858)
+    /// (Issue referenced code 8, but that is already `InvalidWasmHash` here; 18 is used.)
+    SnapshotNotFound    = 18,
 }
 
 #[derive(Clone, PartialEq)]
@@ -87,6 +90,9 @@ pub enum DataKey {
     /// Admin-configurable minimum deposit amount in stroops. Falls back to
     /// `MIN_DEPOSIT_STROOPS` when unset. (#857)
     MinDeposit,
+    /// Point-in-time snapshot of an escrow record, keyed by (order_id,
+    /// ledger_sequence). Stored in temporary storage for the audit trail. (#858)
+    Snapshot(u64, u64),
 }
 
 /// Full escrow record. `token` stores the SAC address used for this escrow (#683).
@@ -604,6 +610,58 @@ impl EscrowContract {
         Ok(())
     }
 
+    /// Store a point-in-time copy of the live escrow record for `order_id`,
+    /// keyed by the current ledger sequence. (#858)
+    ///
+    /// Snapshots live in temporary storage (same TTL as the escrow record) and
+    /// never mutate the live escrow. Used for dispute resolution and audit.
+    /// Internal: callers are responsible for any authorization.
+    fn store_snapshot(env: &Env, order_id: u64) -> Result<u64, EscrowError> {
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(order_id))
+            .ok_or(EscrowError::NotFound)?;
+
+        let seq = env.ledger().sequence() as u64;
+        let key = DataKey::Snapshot(order_id, seq);
+        env.storage().temporary().set(&key, &escrow);
+        env.storage().temporary().extend_ttl(&key, TTL_MIN, TTL_MAX);
+
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("snapshot"), order_id),
+            seq,
+        );
+        Ok(seq)
+    }
+
+    /// Take a snapshot of the current escrow state for `order_id`. (#858)
+    ///
+    /// Callable by the Platform/Arbitrator role (the contract admin acts as the
+    /// arbitrator). Returns the ledger sequence the snapshot was stored under.
+    pub fn take_snapshot(env: Env, order_id: u64) -> Result<u64, EscrowError> {
+        let admin_transfer: AdminTransfer = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(EscrowError::Unauthorized)?;
+        admin_transfer.current_admin.require_auth();
+        Self::store_snapshot(&env, order_id)
+    }
+
+    /// Read-only view: return the escrow snapshot stored for
+    /// (`order_id`, `ledger_sequence`), or `SnapshotNotFound`. (#858)
+    pub fn get_snapshot(
+        env: Env,
+        order_id: u64,
+        ledger_sequence: u64,
+    ) -> Result<Escrow, EscrowError> {
+        env.storage()
+            .temporary()
+            .get(&DataKey::Snapshot(order_id, ledger_sequence))
+            .ok_or(EscrowError::SnapshotNotFound)
+    }
+
     /// Refund funds to the buyer after timeout.
     ///
     /// Uses the token stored in the escrow record (#683).
@@ -679,6 +737,10 @@ impl EscrowContract {
             }
             _ => {}
         }
+
+        // #858: capture a snapshot of the pre-dispute state before mutating it,
+        // so the arbitrator can inspect the escrow as it was when the dispute opened.
+        Self::store_snapshot(&env, order_id)?;
 
         escrow.status = EscrowStatus::Disputed;
         env.storage().persistent().set(&DataKey::Escrow(order_id), &escrow);
@@ -1851,5 +1913,59 @@ mod test {
         let ids: Vec<u64> = Vec::new(&env);
         let results = EscrowContract::batch_release(env, ids).unwrap();
         assert_eq!(results.len(), 0);
+    }
+
+    // ── #858 snapshot audit trail tests ───────────────────────────────────────
+
+    #[test]
+    fn take_snapshot_stores_retrievable_copy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        setup_admin_for(&env);
+        let buyer = Address::generate(&env);
+        let farmer = Address::generate(&env);
+        let token = Address::generate(&env);
+        store_escrow(&env, 900, buyer.clone(), farmer, token);
+
+        let seq = EscrowContract::take_snapshot(env.clone(), 900).unwrap();
+        let snap = EscrowContract::get_snapshot(env, 900, seq).unwrap();
+        assert_eq!(snap.buyer, buyer);
+        assert_eq!(snap.amount, 1_000_0000);
+        assert_eq!(snap.status, EscrowStatus::Active);
+    }
+
+    #[test]
+    fn get_snapshot_missing_returns_not_found() {
+        let env = Env::default();
+        let result = EscrowContract::get_snapshot(env, 999, 1);
+        assert_eq!(result, Err(EscrowError::SnapshotNotFound));
+    }
+
+    #[test]
+    fn take_snapshot_missing_escrow_returns_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        setup_admin_for(&env);
+        let result = EscrowContract::take_snapshot(env, 12345);
+        assert_eq!(result, Err(EscrowError::NotFound));
+    }
+
+    #[test]
+    fn dispute_takes_snapshot_of_pre_dispute_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let buyer = Address::generate(&env);
+        let farmer = Address::generate(&env);
+        let token = Address::generate(&env);
+        store_escrow(&env, 901, buyer.clone(), farmer, token);
+
+        let seq = env.ledger().sequence() as u64;
+        EscrowContract::dispute(env.clone(), 901, buyer).unwrap();
+
+        // Snapshot captured the Active state from before the dispute…
+        let snap = EscrowContract::get_snapshot(env.clone(), 901, seq).unwrap();
+        assert_eq!(snap.status, EscrowStatus::Active);
+        // …while the live record is now Disputed.
+        assert_eq!(EscrowContract::get(env, 901).unwrap().status, EscrowStatus::Disputed);
     }
 }
