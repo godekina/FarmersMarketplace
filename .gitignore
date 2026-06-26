@@ -14,6 +14,7 @@ frontend/.playwright/
 # Rust
 contract/target/
 contract/Cargo.lock
+contracts/target/
 contracts/escrow/target/
 # Test artifacts
 coverage/

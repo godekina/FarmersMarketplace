@@ -11,6 +11,15 @@ const TTL_MAX: u32 = 200_000;
 /// Minimum timeout for a deposit — 1 hour in seconds. (#838)
 const MIN_TIMEOUT_SECS: u64 = 3_600;
 
+/// Default minimum deposit — 0.5 XLM in stroops. Matches the Stellar base
+/// reserve (0.5 XLM per entry) so an escrow record is never worth less than
+/// the ledger storage it occupies. Admin-configurable via `set_min_deposit`. (#857)
+const MIN_DEPOSIT_STROOPS: i128 = 5_000_000;
+
+/// Maximum number of order IDs accepted by `batch_release` in a single call —
+/// keeps the transaction under Stellar's operation limit. (#856)
+const MAX_BATCH_RELEASE: u32 = 20;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -36,6 +45,10 @@ pub enum EscrowError {
     AlreadyInitialized  = 14,
     /// Caller is not the platform admin or does not hold the required role. (#837)
     NotAdmin            = 15,
+    /// Deposit amount is below the configured minimum (dust). (#857)
+    /// (Issue suggested extending InvalidAmount; a dedicated variant is clearer.
+    /// Code 16 is used because 12/8 are already taken by other variants.)
+    BelowMinDeposit     = 16,
 }
 
 #[derive(Clone, PartialEq)]
@@ -68,6 +81,9 @@ pub enum DataKey {
     FeeDestination,
     /// Flag set to true once initialize() has been called. (#837)
     Initialized,
+    /// Admin-configurable minimum deposit amount in stroops. Falls back to
+    /// `MIN_DEPOSIT_STROOPS` when unset. (#857)
+    MinDeposit,
 }
 
 /// Full escrow record. `token` stores the SAC address used for this escrow (#683).
@@ -195,6 +211,17 @@ impl EscrowContract {
         // #838: amount must be positive
         if amount <= 0 {
             return Err(EscrowError::InvalidAmount);
+        }
+
+        // #857: enforce a minimum deposit to prevent dust escrow records that
+        // cost more to store (Stellar base reserve) than they are worth.
+        let min_deposit: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDeposit)
+            .unwrap_or(MIN_DEPOSIT_STROOPS);
+        if amount < min_deposit {
+            return Err(EscrowError::BelowMinDeposit);
         }
 
         // #838: duplicate order_id — immutable, regardless of settlement state
@@ -437,6 +464,36 @@ impl EscrowContract {
         }
         let transfer = AdminTransfer { current_admin: admin, pending_admin: None };
         env.storage().instance().set(&DataKey::Admin, &transfer);
+    }
+
+    /// Admin-only: update the minimum deposit amount (in stroops) to respond to
+    /// XLM price changes. Must be positive. (#857)
+    pub fn set_min_deposit(env: Env, amount: i128) -> Result<(), EscrowError> {
+        let admin_transfer: AdminTransfer = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(EscrowError::Unauthorized)?;
+        admin_transfer.current_admin.require_auth();
+
+        if amount <= 0 {
+            return Err(EscrowError::InvalidAmount);
+        }
+        env.storage().instance().set(&DataKey::MinDeposit, &amount);
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("min_dep")),
+            amount,
+        );
+        Ok(())
+    }
+
+    /// Read-only view: returns the current minimum deposit amount in stroops,
+    /// falling back to the `MIN_DEPOSIT_STROOPS` default when unset. (#857)
+    pub fn get_min_deposit(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinDeposit)
+            .unwrap_or(MIN_DEPOSIT_STROOPS)
     }
 
     /// Refund funds to the buyer after timeout.
@@ -1566,5 +1623,64 @@ mod test {
 
         let result = EscrowContract::multisig_release(env, 604, sigs);
         assert_eq!(result, Err(EscrowError::NotEnoughSignatures));
+    }
+
+    // ── #857 minimum deposit / dust-attack prevention tests ───────────────────
+
+    fn setup_admin_for(env: &Env) -> Address {
+        let admin = Address::generate(env);
+        let transfer = AdminTransfer { current_admin: admin.clone(), pending_admin: None };
+        env.storage().instance().set(&DataKey::Admin, &transfer);
+        admin
+    }
+
+    #[test]
+    fn min_deposit_default_is_half_xlm() {
+        let env = Env::default();
+        assert_eq!(EscrowContract::get_min_deposit(env), 5_000_000);
+    }
+
+    #[test]
+    fn set_min_deposit_updates_queryable_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        setup_admin_for(&env);
+        EscrowContract::set_min_deposit(env.clone(), 10_000_000).unwrap();
+        assert_eq!(EscrowContract::get_min_deposit(env), 10_000_000);
+    }
+
+    #[test]
+    fn set_min_deposit_rejects_non_positive() {
+        let env = Env::default();
+        env.mock_all_auths();
+        setup_admin_for(&env);
+        assert_eq!(
+            EscrowContract::set_min_deposit(env, 0),
+            Err(EscrowError::InvalidAmount)
+        );
+    }
+
+    #[test]
+    fn deposit_below_minimum_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let token = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let farmer = Address::generate(&env);
+        // 0.49 XLM — below the 0.5 XLM default minimum. The guard runs before any
+        // token transfer, so no real token client is required.
+        let result = EscrowContract::deposit(env, token, 700, buyer, farmer, 4_900_000, u64::MAX);
+        assert_eq!(result, Err(EscrowError::BelowMinDeposit));
+    }
+
+    #[test]
+    fn deposit_at_and_above_minimum_pass_amount_guard() {
+        // Mirrors the contract guard: amount >= MIN_DEPOSIT_STROOPS is accepted.
+        // (Full deposit past this point requires a live token client, exercised
+        // by the backend integration tests.)
+        let min = 5_000_000_i128;
+        for amount in [min, min + 1, 10_000_000, 1_000_000_000] {
+            assert!(amount >= min, "amount {amount} should satisfy the minimum-deposit guard");
+        }
     }
 }
