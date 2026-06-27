@@ -4,6 +4,13 @@ const logger = require('../logger');
 const db = require('../db/schema');
 const auth = require('../middleware/auth');
 const validate = require('../middleware/validate');
+const requireEmailVerified = require('../middleware/requireEmailVerified');
+const createPerUserRateLimiter = require('../middleware/rateLimitPerUser');
+
+const orderRateLimit = createPerUserRateLimiter(
+  parseInt(process.env.RATE_LIMIT_ORDER_USER_MAX || '10', 10),
+  60 * 1000,
+);
 const QRCode = require('qrcode');
 const {
   sendPayment,
@@ -185,12 +192,29 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
   let orderIds = [];
   try {
     await db.query('BEGIN');
+    // Lock rows to prevent race conditions
+    const productIds = bundleItems.map((i) => i.product_id);
+    const placeholders = productIds.map((_, i) => `$${i + 1}`).join(',');
+    const { rows: lockedProducts } = await db.query(
+      `SELECT id, name, quantity FROM products WHERE id IN (${placeholders}) FOR UPDATE`,
+      productIds
+    );
+    const stockMap = {};
+    for (const p of lockedProducts) stockMap[p.id] = p;
+
+    const outOfStock = [];
     for (const item of bundleItems) {
-      const { rowCount } = await db.query(
-        'UPDATE products SET quantity = quantity - $1 WHERE id = $2 AND quantity >= $3',
-        [item.quantity, item.product_id, item.quantity]
-      );
-      if (rowCount === 0) throw new Error(`Insufficient stock for "${item.product_name}"`);
+      const stock = stockMap[item.product_id];
+      if (!stock || stock.quantity < item.quantity)
+        outOfStock.push({ product_id: item.product_id, product_name: item.product_name, available: stock?.quantity ?? 0, required: item.quantity });
+    }
+    if (outOfStock.length > 0) {
+      await db.query('ROLLBACK');
+      return res.status(409).json({ success: false, code: 'insufficient_stock', outOfStock });
+    }
+
+    for (const item of bundleItems) {
+      await db.query('UPDATE products SET quantity = quantity - $1 WHERE id = $2', [item.quantity, item.product_id]);
     }
     for (const item of bundleItems) {
       const itemPrice = (item.product_price * item.quantity) / individualTotal * bundle.price;
@@ -235,7 +259,13 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
       discount: discount > 0 ? discount : undefined,
       coupon: appliedCoupon ? { code: appliedCoupon.code, discount_type: appliedCoupon.discount_type } : undefined,
     };
-    if (idempotencyKey) await cacheResponse(idempotencyKey, responseData);
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 200 });
+
+    // Send bundle receipt email (non-fatal)
+    const { sendBundleReceiptEmail } = require('../utils/mailer');
+    sendBundleReceiptEmail({ buyer, bundle, items: bundleItems, totalPrice, discount, txHash })
+      .catch(() => {});
+
     return res.json(responseData);
   } catch (e) {
     await db.query('BEGIN');
@@ -247,7 +277,7 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
     }
     await db.query('COMMIT');
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderIds };
-    if (idempotencyKey) await cacheResponse(idempotencyKey, errorData);
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
   }
 }
@@ -261,7 +291,10 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
  *     security:
  *       - bearerAuth: []
  */
-router.post('/', auth, validate.order, async (req, res) => {
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+router.post('/', auth, requireEmailVerified, validate.order, async (req, res) => {
+router.post('/', auth, orderRateLimit, validate.order, async (req, res) => {
   if (req.user.role !== 'buyer') return err(res, 403, 'Only buyers can place orders', 'forbidden');
 
   const { product_id, quantity, address_id, coupon_code, use_soroban_escrow, custom_price, weight, source_asset, bundle_id, source_asset_code, source_asset_issuer, max_source_amount } = req.body;
@@ -271,9 +304,16 @@ router.post('/', auth, validate.order, async (req, res) => {
   const _sourceAssetIssuer = source_asset_issuer || (source_asset && source_asset.issuer);
   const idempotencyKey = req.headers['x-idempotency-key'];
 
-  if (idempotencyKey) {
-    const cached = getCachedResponse(idempotencyKey);
-    if (cached) return res.status(cached.success ? 200 : 402).json(cached);
+  if (!idempotencyKey || !UUID_V4_RE.test(idempotencyKey)) {
+    return err(res, 400, 'X-Idempotency-Key header must be a valid UUID v4', 'invalid_idempotency_key');
+  }
+
+  try {
+    const cached = await getCachedResponse(idempotencyKey);
+    if (cached) return res.status(cached._status || (cached.success ? 201 : 402)).json(cached);
+  } catch (e) {
+    logger.error('[orders] idempotency cache error', { error: e.message });
+    return res.status(503).json({ success: false, error: 'Service temporarily unavailable', code: 'idempotency_unavailable' });
   }
 
   if (address_id) {
@@ -306,13 +346,26 @@ router.post('/', auth, validate.order, async (req, res) => {
   const buyer = buyerRows[0];
 
   const clientIp = req.ip || req.socket?.remoteAddress || '';
-  const { allowed: geoAllowed } = await checkGeoFence(product, buyer, clientIp);
-  if (!geoAllowed) return err(res, 403, 'Not available in your region', 'region_restricted');
+  const skipGeofence = req.user.role === 'admin' && req.body.skip_geofence === true;
 
-  const { delivery_lat, delivery_lng } = req.body;
-  const coordFence = checkCoordinateGeoFence(product, delivery_lat, delivery_lng);
-  if (!coordFence.allowed)
-    return err(res, 403, 'Delivery location is outside the permitted area for this product', 'outside_delivery_area');
+  if (!skipGeofence) {
+    // Country-code geo-fence check
+    const { allowed: geoAllowed } = await checkGeoFence(product, buyer, clientIp);
+    if (!geoAllowed) return err(res, 403, 'Not available in your region', 'region_restricted');
+
+    // Block order if product has allowed_regions but buyer provides no coordinates
+    const { delivery_lat, delivery_lng } = req.body;
+    let allowedRegions = [];
+    try { allowedRegions = product.allowed_regions ? JSON.parse(product.allowed_regions) : []; } catch { allowedRegions = []; }
+    if (Array.isArray(allowedRegions) && allowedRegions.length > 0 && delivery_lat == null && delivery_lng == null) {
+      return err(res, 403, 'Location coordinates are required to order this product. Please enable location services.', 'geofence_required');
+    }
+
+    // Coordinate-based geo-fence check
+    const coordFence = checkCoordinateGeoFence(product, delivery_lat, delivery_lng);
+    if (!coordFence.allowed)
+      return err(res, 403, 'Delivery location is outside the permitted area for this product', coordFence.reason || 'outside_delivery_area');
+  }
 
   const parsedWeight = weight != null ? parseFloat(weight) : null;
   if (product.pricing_type === 'weight') {
@@ -441,7 +494,7 @@ router.post('/', auth, validate.order, async (req, res) => {
       await db.query('INSERT INTO coupon_uses (coupon_id, user_id) VALUES ($1, $2)', [appliedCoupon.id, req.user.id]);
     }
     const responseData = { success: true, orderId, status: 'pending', totalPrice, message: 'Order created for SEP-0007 payment' };
-    if (idempotencyKey) cacheResponse(idempotencyKey, responseData);
+    if (idempotencyKey) cacheResponse(idempotencyKey, { ...responseData, _status: 200 });
     return res.json(responseData);
   }
 
@@ -461,6 +514,7 @@ router.post('/', auth, validate.order, async (req, res) => {
         farmerPublicKey: product.farmer_wallet,
         amount: totalPrice,
         timeoutUnix,
+        userId: req.user.id,
       });
       txHash = result.txHash;
       balanceId = `soroban:${orderId}`;
@@ -551,8 +605,12 @@ router.post('/', auth, validate.order, async (req, res) => {
 
     const rewardAmount = Math.floor(totalPrice);
     if (rewardAmount > 0 && buyer.stellar_public_key) {
-      mintRewardTokens(buyer.stellar_public_key, rewardAmount)
-        .catch((e) => logger.error('[Rewards] Failed to mint tokens:', { error: e.message }));
+      try {
+        mintRewardTokens(buyer.stellar_public_key, rewardAmount)
+          .catch((e) => logger.warn('[Rewards] Mint failed (non-fatal):', { error: e.message }));
+      } catch (e) {
+        logger.warn('[Rewards] Mint failed (non-fatal):', { error: e.message });
+      }
     }
 
     const feeInfo = getPlatformFeeInfo(totalPrice);
@@ -572,8 +630,8 @@ router.post('/', auth, validate.order, async (req, res) => {
       claimableBalanceId: balanceId,
       sourceAsset: usePathPayment ? _sourceAssetCode : 'XLM',
     };
-    if (idempotencyKey) await cacheResponse(idempotencyKey, responseData);
-    return res.json(responseData);
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 201 });
+    return res.status(201).json(responseData);
   } catch (e) {
     if (usePathPayment) {
       // Path payment orders must not be persisted on failure — delete the pending row
@@ -586,7 +644,7 @@ router.post('/', auth, validate.order, async (req, res) => {
     if (e.code === 'account_not_found')
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
-    if (idempotencyKey) await cacheResponse(idempotencyKey, errorData);
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
   }
 });
@@ -696,13 +754,24 @@ router.patch('/:id/status', auth, validate.updateOrderStatus, async (req, res) =
   const order = rows[0];
   if (!order) return err(res, 404, 'Order not found or not yours', 'not_found');
 
-  await db.query('UPDATE orders SET status = $1 WHERE id = $2', [status, order.id]);
+  if (status === 'delivered') {
+    await db.query(
+      'UPDATE orders SET status = $1, delivered_at = $2 WHERE id = $3',
+      [status, new Date().toISOString(), order.id]
+    );
+  } else {
+    await db.query('UPDATE orders SET status = $1 WHERE id = $2', [status, order.id]);
+  }
 
   if (status === 'completed' && order.buyer_stellar_address) {
     const rewardAmount = parseInt(process.env.REWARD_TOKENS_PER_ORDER || '100', 10);
     if (rewardAmount > 0) {
-      mintRewardTokens(order.buyer_stellar_address, rewardAmount)
-        .catch((e) => logger.error(`Failed to mint reward tokens for order ${order.id}:`, { error: e.message }));
+      try {
+        mintRewardTokens(order.buyer_stellar_address, rewardAmount)
+          .catch((e) => logger.warn(`[Rewards] Mint failed for order ${order.id} (non-fatal):`, { error: e.message }));
+      } catch (e) {
+        logger.warn(`[Rewards] Mint failed for order ${order.id} (non-fatal):`, { error: e.message });
+      }
     }
   }
 
@@ -752,6 +821,7 @@ router.post('/:id/escrow', auth, async (req, res) => {
       farmerPublicKey: order.farmer_wallet,
       amount: order.total_price,
       timeoutUnix,
+      userId: req.user.id,
     });
     await db.query(
       'UPDATE orders SET status = $1, stellar_tx_hash = $2, escrow_balance_id = $3, escrow_status = $4 WHERE id = $5',
@@ -774,7 +844,7 @@ router.post('/:id/dispute', auth, async (req, res) => {
 
   const { rows: uRows } = await db.query('SELECT stellar_secret_key FROM users WHERE id = $1', [req.user.id]);
   try {
-    const result = await invokeEscrowContract({ action: 'dispute', senderSecret: uRows[0].stellar_secret_key, orderId: Number(order.id) });
+    const result = await invokeEscrowContract({ action: 'dispute', senderSecret: uRows[0].stellar_secret_key, orderId: Number(order.id), userId: req.user.id });
     return res.json({ success: true, txHash: result.txHash });
   } catch (e) {
     return res.status(402).json({ success: false, message: e.message });
@@ -791,7 +861,7 @@ router.post('/:id/refund', auth, async (req, res) => {
 
   const { rows: uRows } = await db.query('SELECT stellar_secret_key FROM users WHERE id = $1', [req.user.id]);
   try {
-    const result = await invokeEscrowContract({ action: 'refund', senderSecret: uRows[0].stellar_secret_key, orderId: Number(order.id) });
+    const result = await invokeEscrowContract({ action: 'refund', senderSecret: uRows[0].stellar_secret_key, orderId: Number(order.id), userId: req.user.id });
     await db.query('UPDATE orders SET escrow_status = $1, stellar_tx_hash = $2 WHERE id = $3', ['refunded', result.txHash, order.id]);
     return res.json({ success: true, txHash: result.txHash });
   } catch (e) {

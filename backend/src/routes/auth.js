@@ -14,6 +14,16 @@ const validate = require('../middleware/validate');
 const auth = require('../middleware/auth');
 const { err } = require('../middleware/error');
 const logger = require('../logger');
+const { createPerIpRateLimiter } = require('../middleware/rateLimitPerUser');
+
+const loginRateLimit = createPerIpRateLimiter(
+  parseInt(process.env.RATE_LIMIT_LOGIN_MAX || '5', 10),
+  60 * 1000,
+);
+const registerRateLimit = createPerIpRateLimiter(
+  parseInt(process.env.RATE_LIMIT_REGISTER_MAX || '3', 10),
+  60 * 1000,
+);
 
 const ACCESS_TOKEN_TTL = '15m';
 const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days in ms
@@ -173,7 +183,7 @@ async function rotateRefreshToken(userId, oldRawToken) {
  *             schema: { $ref: '#/components/schemas/Error' }
  */
 // POST /api/auth/register
-router.post('/register', validate.register, async (req, res) => {
+router.post('/register', registerRateLimit, validate.register, async (req, res) => {
   const { name, email, password, role, ref } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 12);
@@ -251,7 +261,7 @@ router.post('/register', validate.register, async (req, res) => {
  *             schema: { $ref: '#/components/schemas/Error' }
  */
 // POST /api/auth/login
-router.post('/login', validate.login, async (req, res) => {
+router.post('/login', loginRateLimit, validate.login, async (req, res) => {
   const { email, password } = req.body;
   const { rows } = await db.query(
     'SELECT id, name, email, password, role, stellar_public_key FROM users WHERE email = $1',
@@ -267,6 +277,9 @@ router.post('/login', validate.login, async (req, res) => {
   const rawRefresh = generateRefreshToken();
   await storeRefreshToken(user.id, rawRefresh);
 
+  // #836: Rotate CSRF token on every login to prevent token-fixation attacks.
+  generateCsrfToken(res);
+
   res.cookie('refreshToken', rawRefresh, COOKIE_OPTIONS);
   res.json({
     token: accessToken,
@@ -279,6 +292,13 @@ router.post('/login', validate.login, async (req, res) => {
     },
   });
 });
+
+/**
+ * GET /api/auth/csrf-token
+ * Returns a fresh CSRF token for SPA initialization. (#836)
+ * The token is also set as a readable cookie for the double-submit cookie pattern.
+ */
+router.get('/csrf-token', csrfTokenHandler);
 
 /**
  * @swagger
